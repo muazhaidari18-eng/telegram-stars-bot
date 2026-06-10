@@ -1,5 +1,7 @@
 import logging
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -12,6 +14,8 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
     raise RuntimeError("BOT_TOKEN environment variable is required to run the bot.")
+
+PAYMENT_CHANNEL_ID = int(os.getenv("PAYMENT_CHANNEL_ID"))
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -130,23 +134,26 @@ async def callback_facetime_latenight_menu(query: CallbackQuery) -> None:
 async def callback_pay_service(query: CallbackQuery) -> None:
     payload_name = query.data.removeprefix("pay_")
     product_info = {
-        "girlfriend": {
+            "girlfriend": {
             "title": "Girlfriend Experience",
             "description": "Pay 25,000 Stars for the Girlfriend Experience",
             "amount": 25000,
             "label": "Girlfriend Experience",
+            "payload": "girlfriend_experience",
         },
         "facetime_casual": {
             "title": "Just Catching Up FaceTime",
             "description": "Pay 7,999 Stars for the casual FaceTime package",
             "amount": 7999,
             "label": "Just Catching Up FaceTime",
+            "payload": "facetime_casual",
         },
         "facetime_latenight": {
             "title": "The Late Night FaceTime",
             "description": "Pay 14,999 Stars for the late night FaceTime package",
             "amount": 14999,
             "label": "The Late Night FaceTime",
+            "payload": "facetime_latenight",
         },
     }.get(payload_name)
 
@@ -158,9 +165,61 @@ async def callback_pay_service(query: CallbackQuery) -> None:
         chat_id=query.from_user.id,
         title=product_info["title"],
         description=product_info["description"],
-        payload=f"{payload_name}_product",
+        payload=product_info["payload"],
         currency="XTR",
         prices=[LabeledPrice(label=product_info["label"], amount=product_info["amount"])],
+    )
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def successful_payment(message: Message):
+    payload = message.successful_payment.invoice_payload
+    stars = message.successful_payment.total_amount
+
+    username = (
+        f"@{message.from_user.username}"
+        if message.from_user.username
+        else "No Username"
+    )
+
+    user_id = message.from_user.id
+
+    product_map = {
+        "girlfriend_experience": "Girlfriend Experience",
+        "facetime_casual": "Just Catching Up FaceTime",
+        "facetime_latenight": "The Late Night FaceTime",
+    }
+
+    product_name = product_map.get(payload, payload)
+
+    now = datetime.now(
+        ZoneInfo("Asia/Kolkata")
+    ).strftime("%I:%M:%S %p IST")
+
+    admin_message = f"""
+💰 PAYMENT RECEIVED
+
+👤 User: {username} ({user_id})
+🛍️ Product: {product_name}
+
+⭐ Stars: {stars}
+
+📦 Type: one-time
+⏱️ Time: {now}
+"""
+
+    await bot.send_message(
+        PAYMENT_CHANNEL_ID,
+        admin_message
+    )
+
+    await message.answer(
+        "✅ Payment received successfully!"
     )
 
 
@@ -182,23 +241,6 @@ async def callback_back_to_facetime(query: CallbackQuery) -> None:
         reply_markup=keyboard,
     )
     await query.answer()
-
-
-@dp.pre_checkout_query()
-async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await pre_checkout_query.answer(ok=True)
-
-
-@dp.callback_query(F.data.startswith("pay_"))
-async def callback_placeholder_payment(query: CallbackQuery) -> None:
-    payload_name = query.data.removeprefix("pay_")
-    product_name = {
-        "girlfriend": "Girlfriend Experience",
-        "facetime_casual": "Just Catching Up FaceTime",
-        "facetime_latenight": "The Late Night FaceTime",
-    }.get(payload_name, "selected product")
-
-    await query.answer(f"Payment flow for {product_name} is not implemented yet.", show_alert=True)
 
 
 if __name__ == "__main__":
