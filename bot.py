@@ -137,7 +137,7 @@ async def callback_pay_service(query: CallbackQuery) -> None:
             "girlfriend": {
             "title": "Girlfriend Experience",
             "description": "Pay 25,000 Stars for the Girlfriend Experience",
-            "amount": 0,
+            "amount": 1,
             "label": "Girlfriend Experience",
             "payload": "girlfriend_experience",
         },
