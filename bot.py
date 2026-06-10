@@ -3,7 +3,7 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, LabeledPrice, Message, PreCheckoutQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
@@ -116,6 +116,18 @@ async def callback_facetime_casual_menu(query: CallbackQuery) -> None:
     await query.answer()
 
 
+@dp.callback_query(F.data == "pay_facetime_casual")
+async def pay_casual(query: CallbackQuery):
+    await bot.send_invoice(
+        chat_id=query.from_user.id,
+        title="Test Product",
+        description="Testing Telegram Stars",
+        payload="test_product",
+        currency="XTR",
+        prices=[LabeledPrice(label="Test", amount=1)],
+    )
+
+
 @dp.callback_query(F.data == "facetime_latenight_menu")
 async def callback_facetime_latenight_menu(query: CallbackQuery) -> None:
     keyboard = latenight_menu_keyboard().as_markup()
@@ -144,6 +156,11 @@ async def callback_back_to_facetime(query: CallbackQuery) -> None:
         reply_markup=keyboard,
     )
     await query.answer()
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    await pre_checkout_query.answer(ok=True)
 
 
 @dp.callback_query(F.data.startswith("pay_"))
