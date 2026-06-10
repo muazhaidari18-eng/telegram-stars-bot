@@ -33,7 +33,7 @@ def main_menu_keyboard() -> InlineKeyboardBuilder:
 def girlfriend_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="💳 Pay 25,000 Stars", callback_data="pay_girlfriend"),
+        InlineKeyboardButton(text="💳 Pay 24,999 Stars", callback_data="pay_girlfriend"),
     )
     keyboard.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
@@ -94,7 +94,7 @@ async def cmd_start(message: Message) -> None:
 async def callback_girlfriend_menu(query: CallbackQuery) -> None:
     keyboard = girlfriend_menu_keyboard().as_markup()
     await query.message.edit_text(
-        "💕 Girlfriend Experience\n\n⭐ Price: 25,000 Stars",
+        "💕 Girlfriend Experience\n\n⭐ Price: 24,999 Stars",
         reply_markup=keyboard,
     )
     await query.answer()
