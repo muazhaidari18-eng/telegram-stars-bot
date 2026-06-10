@@ -1,12 +1,17 @@
+import logging
 import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
+logging.basicConfig(level=logging.INFO)
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+    raise RuntimeError("BOT_TOKEN environment variable is required to run the bot.")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -15,8 +20,8 @@ dp = Dispatcher()
 def main_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardBuilder().button(text="💕 Girlfriend Experience", callback_data="girlfriend_menu"),
-        InlineKeyboardBuilder().button(text="📱 FaceTime", callback_data="facetime_menu"),
+        InlineKeyboardButton(text="💕 Girlfriend Experience", callback_data="girlfriend_menu"),
+        InlineKeyboardButton(text="📱 FaceTime", callback_data="facetime_menu"),
     )
     return keyboard
 
@@ -24,10 +29,10 @@ def main_menu_keyboard() -> InlineKeyboardBuilder:
 def girlfriend_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardBuilder().button(text="💳 Pay 25,000 Stars", callback_data="pay_girlfriend"),
+        InlineKeyboardButton(text="💳 Pay 25,000 Stars", callback_data="pay_girlfriend"),
     )
     keyboard.row(
-        InlineKeyboardBuilder().button(text="⬅️ Back", callback_data="back_to_main"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
     )
     return keyboard
 
@@ -35,13 +40,13 @@ def girlfriend_menu_keyboard() -> InlineKeyboardBuilder:
 def facetime_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardBuilder().button(text="☕ Just Catching Up FaceTime ⭐7,999", callback_data="facetime_casual_menu"),
+        InlineKeyboardButton(text="☕ Just Catching Up FaceTime ⭐7,999", callback_data="facetime_casual_menu"),
     )
     keyboard.row(
-        InlineKeyboardBuilder().button(text="🌙 The Late Night FaceTime ⭐14,999", callback_data="facetime_latenight_menu"),
+        InlineKeyboardButton(text="🌙 The Late Night FaceTime ⭐14,999", callback_data="facetime_latenight_menu"),
     )
     keyboard.row(
-        InlineKeyboardBuilder().button(text="⬅️ Back", callback_data="back_to_main"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
     )
     return keyboard
 
@@ -49,10 +54,10 @@ def facetime_menu_keyboard() -> InlineKeyboardBuilder:
 def casual_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardBuilder().button(text="💳 Pay 7,999 Stars", callback_data="pay_facetime_casual"),
+        InlineKeyboardButton(text="💳 Pay 7,999 Stars", callback_data="pay_facetime_casual"),
     )
     keyboard.row(
-        InlineKeyboardBuilder().button(text="⬅️ Back", callback_data="back_to_facetime"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_facetime"),
     )
     return keyboard
 
@@ -60,10 +65,10 @@ def casual_menu_keyboard() -> InlineKeyboardBuilder:
 def latenight_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardBuilder().button(text="💳 Pay 14,999 Stars", callback_data="pay_facetime_latenight"),
+        InlineKeyboardButton(text="💳 Pay 14,999 Stars", callback_data="pay_facetime_latenight"),
     )
     keyboard.row(
-        InlineKeyboardBuilder().button(text="⬅️ Back", callback_data="back_to_facetime"),
+        InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_facetime"),
     )
     return keyboard
 
