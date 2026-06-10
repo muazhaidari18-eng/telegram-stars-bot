@@ -116,18 +116,6 @@ async def callback_facetime_casual_menu(query: CallbackQuery) -> None:
     await query.answer()
 
 
-@dp.callback_query(F.data == "pay_facetime_casual")
-async def pay_casual(query: CallbackQuery):
-    await bot.send_invoice(
-        chat_id=query.from_user.id,
-        title="Test Product",
-        description="Testing Telegram Stars",
-        payload="test_product",
-        currency="XTR",
-        prices=[LabeledPrice(label="Test", amount=1)],
-    )
-
-
 @dp.callback_query(F.data == "facetime_latenight_menu")
 async def callback_facetime_latenight_menu(query: CallbackQuery) -> None:
     keyboard = latenight_menu_keyboard().as_markup()
@@ -136,6 +124,44 @@ async def callback_facetime_latenight_menu(query: CallbackQuery) -> None:
         reply_markup=keyboard,
     )
     await query.answer()
+
+
+@dp.callback_query(F.data.startswith("pay_"))
+async def callback_pay_service(query: CallbackQuery) -> None:
+    payload_name = query.data.removeprefix("pay_")
+    product_info = {
+        "girlfriend": {
+            "title": "Girlfriend Experience",
+            "description": "Pay 25,000 Stars for the Girlfriend Experience",
+            "amount": 25000,
+            "label": "Girlfriend Experience",
+        },
+        "facetime_casual": {
+            "title": "Just Catching Up FaceTime",
+            "description": "Pay 7,999 Stars for the casual FaceTime package",
+            "amount": 7999,
+            "label": "Just Catching Up FaceTime",
+        },
+        "facetime_latenight": {
+            "title": "The Late Night FaceTime",
+            "description": "Pay 14,999 Stars for the late night FaceTime package",
+            "amount": 14999,
+            "label": "The Late Night FaceTime",
+        },
+    }.get(payload_name)
+
+    if product_info is None:
+        await query.answer("Payment flow for this product is not implemented yet.", show_alert=True)
+        return
+
+    await bot.send_invoice(
+        chat_id=query.from_user.id,
+        title=product_info["title"],
+        description=product_info["description"],
+        payload=f"{payload_name}_product",
+        currency="XTR",
+        prices=[LabeledPrice(label=product_info["label"], amount=product_info["amount"])],
+    )
 
 
 @dp.callback_query(F.data == "back_to_main")
