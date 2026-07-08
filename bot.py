@@ -107,6 +107,20 @@ PRODUCTS = {
         "label": "👗 Outfit #2 - Custom Outfit Experience",
         "product_name": "Custom Outfit Experience (10 Minutes) - Outfit #2",
     },
+    "video_custom_outfit_3_10": {
+        "title": "Custom Outfit Experience (10 Minutes) - Outfit #3",
+        "description": "Pay 6000 Stars for Custom Outfit Experience (10 Minutes) - Outfit #3",
+        "amount": 6000,
+        "label": "👗 Outfit #3 - Custom Outfit Experience",
+        "product_name": "Custom Outfit Experience (10 Minutes) - Outfit #3",
+    },
+    "video_custom_outfit_4_10": {
+        "title": "Custom Outfit Experience (10 Minutes) - Outfit #4",
+        "description": "Pay 6000 Stars for Custom Outfit Experience (10 Minutes) - Outfit #4",
+        "amount": 6000,
+        "label": "👗 Outfit #4 - Custom Outfit Experience",
+        "product_name": "Custom Outfit Experience (10 Minutes) - Outfit #4",
+    },
     "video_ultimate_outfit_1_15": {
         "title": "Ultimate VIP Experience (15 Minutes) - Outfit #1",
         "description": "Pay 8500 Stars for Ultimate VIP Experience (15 Minutes) - Outfit #1",
@@ -120,6 +134,20 @@ PRODUCTS = {
         "amount": 8500,
         "label": "👗 Outfit #2 - Ultimate VIP Experience",
         "product_name": "Ultimate VIP Experience (15 Minutes) - Outfit #2",
+    },
+    "video_ultimate_outfit_3_15": {
+        "title": "Ultimate VIP Experience (15 Minutes) - Outfit #3",
+        "description": "Pay 8500 Stars for Ultimate VIP Experience (15 Minutes) - Outfit #3",
+        "amount": 8500,
+        "label": "👗 Outfit #3 - Ultimate VIP Experience",
+        "product_name": "Ultimate VIP Experience (15 Minutes) - Outfit #3",
+    },
+    "video_ultimate_outfit_4_15": {
+        "title": "Ultimate VIP Experience (15 Minutes) - Outfit #4",
+        "description": "Pay 8500 Stars for Ultimate VIP Experience (15 Minutes) - Outfit #4",
+        "amount": 8500,
+        "label": "👗 Outfit #4 - Ultimate VIP Experience",
+        "product_name": "Ultimate VIP Experience (15 Minutes) - Outfit #4",
     },
 }
 
@@ -208,12 +236,24 @@ def video_outfit_menu_keyboard(variant: str) -> InlineKeyboardBuilder:
         keyboard.row(
             InlineKeyboardButton(text="👗 Outfit #2", callback_data="pay_video_custom_outfit_2_10"),
         )
+        keyboard.row(
+            InlineKeyboardButton(text="👗 Outfit #3", callback_data="pay_video_custom_outfit_3_10"),
+        )
+        keyboard.row(
+            InlineKeyboardButton(text="👗 Outfit #4", callback_data="pay_video_custom_outfit_4_10"),
+        )
     else:
         keyboard.row(
             InlineKeyboardButton(text="👗 Outfit #1", callback_data="pay_video_ultimate_outfit_1_15"),
         )
         keyboard.row(
             InlineKeyboardButton(text="👗 Outfit #2", callback_data="pay_video_ultimate_outfit_2_15"),
+        )
+        keyboard.row(
+            InlineKeyboardButton(text="👗 Outfit #3", callback_data="pay_video_ultimate_outfit_3_15"),
+        )
+        keyboard.row(
+            InlineKeyboardButton(text="👗 Outfit #4", callback_data="pay_video_ultimate_outfit_4_15"),
         )
     keyboard.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_video"),
@@ -267,20 +307,16 @@ async def callback_video_call_menu(query: CallbackQuery) -> None:
 @dp.callback_query(F.data == "video_custom_menu")
 async def callback_video_custom_menu(query: CallbackQuery) -> None:
     keyboard = video_outfit_menu_keyboard("custom").as_markup()
-    await query.message.edit_text(
-        OUTFIT_MENU_TEXT,
-        reply_markup=keyboard,
-    )
+    image_url = "https://raw.githubusercontent.com/muazhaidari18-eng/telegram-stars-bot/refs/heads/main/Dress-Options.png"
+    await query.message.answer_photo(photo=image_url, caption=OUTFIT_MENU_TEXT, reply_markup=keyboard)
     await query.answer()
 
 
 @dp.callback_query(F.data == "video_ultimate_menu")
 async def callback_video_ultimate_menu(query: CallbackQuery) -> None:
     keyboard = video_outfit_menu_keyboard("ultimate").as_markup()
-    await query.message.edit_text(
-        OUTFIT_MENU_TEXT,
-        reply_markup=keyboard,
-    )
+    image_url = "https://raw.githubusercontent.com/muazhaidari18-eng/telegram-stars-bot/refs/heads/main/Dress-Options.png"
+    await query.message.answer_photo(photo=image_url, caption=OUTFIT_MENU_TEXT, reply_markup=keyboard)
     await query.answer()
 
 
