@@ -176,7 +176,7 @@ def main_menu_keyboard() -> InlineKeyboardBuilder:
 def private_chat_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="� Touch Yourself With Me (10 Min) — ⭐500", callback_data="pay_text_15"),
+        InlineKeyboardButton(text="💦 Touch Yourself With Me (10 Min) — ⭐500", callback_data="pay_text_15"),
     )
     keyboard.row(
         InlineKeyboardButton(text="❤️ So Wet & Waiting For You (20 Min) — ⭐900", callback_data="pay_text_30"),
