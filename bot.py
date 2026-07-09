@@ -25,7 +25,7 @@ MAIN_MENU_TEXT = (
     "Megha's private inbox is currently reserved for VIP clients. Choose your VIP experience below."
 )
 PRIVATE_CHAT_TEXT = (
-    "Spend some one-on-one time with Megha. Choose your preferred chat session below."
+    "Spend some one-on-one time with Megha. Choose your preferred sexting session below."
 )
 VOICE_CALL_TEXT = (
     "Hear Megha's voice in a private Telegram call. Pick your preferred duration."
@@ -38,25 +38,25 @@ OUTFIT_MENU_TEXT = "Choose your preferred outfit for your session."
 
 PRODUCTS = {
     "text_15": {
-        "title": "Sweet Start (15 Minutes)",
-        "description": "Pay 500 Stars for Sweet Start (15 Minutes)",
+        "title": "Touch Yourself With Me (10 Min)",
+        "description": "Pay 500 Stars for Touch Yourself With Me (10 Min)",
         "amount": 500,
-        "label": "💖 Sweet Start (15 Minutes) — ⭐500",
-        "product_name": "Sweet Start (15 Minutes)",
+        "label": "💦 Touch Yourself With Me (10 Min) — ⭐500",
+        "product_name": "Touch Yourself With Me (10 Min)",
     },
     "text_30": {
-        "title": "Private Vibes (30 Minutes)",
-        "description": "Pay 900 Stars for Private Vibes (30 Minutes)",
+        "title": "So Wet & Waiting For You (20 Min)",
+        "description": "Pay 900 Stars for So Wet & Waiting For You (20 Min)",
         "amount": 900,
-        "label": "❤️ Private Vibes (30 Minutes) — ⭐900",
-        "product_name": "Private Vibes (30 Minutes)",
+        "label": "❤️ So Wet & Waiting For You (20 Min) — ⭐900",
+        "product_name": "So Wet & Waiting For You (20 Min)",
     },
     "text_60": {
-        "title": "VIP Girlfriend Chat (60 Minutes)",
-        "description": "Pay 1700 Stars for VIP Girlfriend Chat (60 Minutes)",
-        "amount": 1700,
-        "label": "🔥 VIP Girlfriend Chat (60 Minutes) — ⭐1700",
-        "product_name": "VIP Girlfriend Chat (60 Minutes)",
+        "title": "Total Devotion: My Clothes Come Off (30 Min)",
+        "description": "Pay 1300 Stars for Total Devotion: My Clothes Come Off (30 Min)",
+        "amount": 1300,
+        "label": "🔥 Total Devotion: My Clothes Come Off (30 Min) — ⭐1300",
+        "product_name": "Total Devotion: My Clothes Come Off (30 Min)",
     },
     "voice_10": {
         "title": "Sweet Talk (10 Minutes)",
@@ -164,7 +164,7 @@ def get_product_name(payload_name: str) -> str:
 def main_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="💬 Private Chat", callback_data="private_chat_menu"),
+        InlineKeyboardButton(text="💬 Sexting Chat", callback_data="private_chat_menu"),
         InlineKeyboardButton(text="📞 Private Voice Call", callback_data="voice_call_menu"),
     )
     keyboard.row(
@@ -176,13 +176,13 @@ def main_menu_keyboard() -> InlineKeyboardBuilder:
 def private_chat_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="💖 Sweet Start (15 Minutes) — ⭐500", callback_data="pay_text_15"),
+        InlineKeyboardButton(text="� Touch Yourself With Me (10 Min) — ⭐500", callback_data="pay_text_15"),
     )
     keyboard.row(
-        InlineKeyboardButton(text="❤️ Private Vibes (30 Minutes) — ⭐900", callback_data="pay_text_30"),
+        InlineKeyboardButton(text="❤️ So Wet & Waiting For You (20 Min) — ⭐900", callback_data="pay_text_30"),
     )
     keyboard.row(
-        InlineKeyboardButton(text="🔥 VIP Girlfriend Chat (60 Minutes) — ⭐1700", callback_data="pay_text_60"),
+        InlineKeyboardButton(text="🔥 Total Devotion: My Clothes Come Off (30 Min) — ⭐1300", callback_data="pay_text_60"),
     )
     keyboard.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),

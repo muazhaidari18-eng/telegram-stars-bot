@@ -25,8 +25,13 @@ class MenuPayloadTests(unittest.TestCase):
         self.assertIsNotNone(bot.get_product_info("video_ultimate_outfit_1_15"))
         self.assertIsNotNone(bot.get_product_info("video_ultimate_outfit_2_15"))
 
+    def test_text_products_use_new_sexting_labels(self):
+        self.assertEqual(bot.get_product_info("text_15")["label"], "💦 Touch Yourself With Me (10 Min) — ⭐500")
+        self.assertEqual(bot.get_product_info("text_30")["label"], "❤️ So Wet & Waiting For You (20 Min) — ⭐900")
+        self.assertEqual(bot.get_product_info("text_60")["label"], "🔥 Total Devotion: My Clothes Come Off (30 Min) — ⭐1300")
+
     def test_admin_product_names_use_new_menu_labels(self):
-        self.assertEqual(bot.get_product_name("text_15"), "Sweet Start (15 Minutes)")
+        self.assertEqual(bot.get_product_name("text_15"), "Touch Yourself With Me (10 Min)")
         self.assertEqual(bot.get_product_name("voice_20"), "Late Night Vibes (20 Minutes)")
         self.assertEqual(bot.get_product_name("video_ultimate_outfit_2_15"), "Ultimate VIP Experience (15 Minutes) - Outfit #2")
 
