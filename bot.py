@@ -23,8 +23,8 @@ UPI_QR_IMAGE_URL = os.getenv(
     "UPI_QR_IMAGE_URL",
     "https://raw.githubusercontent.com/muazhaidari18-eng/telegram-stars-bot/main/Megha-Shaw-UPI.jpeg",
 )
-CHAT_UPI_PRICE = int(os.getenv("CHAT_UPI_PRICE", "1998"))
-VIDEO_UPI_PRICE = int(os.getenv("VIDEO_UPI_PRICE", "9998"))
+CHAT_UPI_PRICE = int(os.getenv("CHAT_UPI_PRICE", "999"))
+VIDEO_UPI_PRICE = int(os.getenv("VIDEO_UPI_PRICE", "4999"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "payments.sqlite3")
 IST = ZoneInfo("Asia/Kolkata")
 SUBSCRIPTION_PERIOD = 30 * 24 * 60 * 60
@@ -78,7 +78,7 @@ def private_chat_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
         InlineKeyboardButton(text="⭐ Pay 999 Stars / Month", callback_data="pay_chat"),
-        InlineKeyboardButton(text="🇮🇳 Pay ₹1,998 via UPI", callback_data="upi_chat"),
+        InlineKeyboardButton(text="🇮🇳 Pay ₹999 via UPI", callback_data="upi_chat"),
     )
     keyboard.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
@@ -90,7 +90,7 @@ def video_call_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
         InlineKeyboardButton(text="⭐ Pay 4,999 Stars", callback_data="pay_video"),
-        InlineKeyboardButton(text="🇮🇳 Pay ₹9,998 via UPI", callback_data="upi_video"),
+        InlineKeyboardButton(text="🇮🇳 Pay ₹4,999 via UPI", callback_data="upi_video"),
     )
     keyboard.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
