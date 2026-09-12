@@ -4,7 +4,8 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-
+import aiogram
+logging.info(f"AIROGRAM VERSION: {aiogram.__version__}")
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
