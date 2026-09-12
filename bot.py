@@ -226,7 +226,7 @@ async def callback_upi(query: CallbackQuery) -> None:
             f"💰 Amount: ₹{product['upi_amount']:,}\n"
             f"💳 UPI ID: {UPI_ID}\n\n"
             "Scan the QR code or pay directly to the UPI ID.\n\n"
-            "After completing the payment, send your payment screenshot here for verification."
+            "After payment, send the screenshot directly to the channel DM for verification."
         ),
         reply_markup=back_keyboard().as_markup(),
     )
