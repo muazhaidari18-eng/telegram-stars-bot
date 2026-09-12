@@ -22,6 +22,14 @@ class MenuPayloadTests(unittest.TestCase):
         self.assertEqual(bot.PRODUCTS["video"]["amount"], 4999)
         self.assertEqual(bot.PRODUCTS["video"]["upi_amount"], 4999)
 
+    def test_private_chat_menu_explains_access_duration(self):
+        self.assertIn("one-time payment", bot.PRIVATE_CHAT_TEXT)
+        self.assertIn("full 30 days", bot.PRIVATE_CHAT_TEXT)
+        self.assertLess(
+            bot.PRIVATE_CHAT_TEXT.index("full 30 days"),
+            bot.PRIVATE_CHAT_TEXT.index("Choose your payment method"),
+        )
+
 class StarsPaymentFlowTests(unittest.IsolatedAsyncioTestCase):
     def query(self, payload):
         return SimpleNamespace(

@@ -33,7 +33,12 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 MAIN_MENU_TEXT = "Welcome cutie... select your VIP access below 🤍✨"
-PRIVATE_CHAT_TEXT = "💬 Chat with Me\n\nStay connected with private VIP chat access.\n\nChoose your payment method:"
+PRIVATE_CHAT_TEXT = (
+    "💬 Chat with Me\n\n"
+    "Stay connected with private VIP chat access.\n\n"
+    "Your one-time payment unlocks a full 30 days of private chat access.\n\n"
+    "Choose your payment method:"
+)
 VIDEO_CALL_TEXT = "📹 Book a Private Video Call\n\nBook your private 1-on-1 video call.\n\nChoose your payment method:"
 
 PRODUCTS = {
