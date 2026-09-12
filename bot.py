@@ -28,7 +28,6 @@ CHAT_UPI_PRICE = int(os.getenv("CHAT_UPI_PRICE", "999"))
 VIDEO_UPI_PRICE = int(os.getenv("VIDEO_UPI_PRICE", "4999"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "payments.sqlite3")
 IST = ZoneInfo("Asia/Kolkata")
-SUBSCRIPTION_PERIOD = 30 * 24 * 60 * 60
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
@@ -78,7 +77,7 @@ def main_menu_keyboard() -> InlineKeyboardBuilder:
 def private_chat_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="⭐ Pay 999 Stars / Month", callback_data="pay_chat"),
+        InlineKeyboardButton(text="⭐ Pay 999 Stars", callback_data="pay_chat"),
         InlineKeyboardButton(text="🇮🇳 Pay ₹999 via UPI", callback_data="upi_chat"),
     )
     keyboard.row(
@@ -309,30 +308,17 @@ async def callback_pay_service(query: CallbackQuery) -> None:
         invoice_kwargs = {
             "title": product_info["title"],
             "description": product_info["description"],
-            "payload": "chat_subscription" if payload_name == "chat" else payload_name,
+            "payload": payload_name,
             "currency": "XTR",
             "prices": [
                 LabeledPrice(
-                    label="Chat with Me — 30 Days" if payload_name == "chat" else product_info["label"],
-                    amount=999 if payload_name == "chat" else product_info["amount"],
+                    label=product_info["label"],
+                    amount=product_info["amount"],
                 )
             ],
         }
 
-        if payload_name == "chat":
-            invoice_url = await bot.create_invoice_link(
-                **invoice_kwargs,
-                subscription_period=SUBSCRIPTION_PERIOD,
-            )
-            keyboard = InlineKeyboardBuilder()
-            keyboard.button(text="⭐ Subscribe for 999 Stars / Month", url=invoice_url)
-            await bot.send_message(
-                query.from_user.id,
-                "Tap below to start your 999-Star monthly subscription.",
-                reply_markup=keyboard.as_markup(),
-            )
-        else:
-            await bot.send_invoice(chat_id=query.from_user.id, **invoice_kwargs)
+        await bot.send_invoice(chat_id=query.from_user.id, **invoice_kwargs)
         await query.answer()
     except Exception:
         logging.exception("Failed to create Telegram Stars invoice")
@@ -344,7 +330,7 @@ async def callback_pay_service(query: CallbackQuery) -> None:
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(
-        ok=pre_checkout_query.invoice_payload in {"chat_subscription", "video"}
+        ok=pre_checkout_query.invoice_payload in {"chat", "video"}
     )
 
 
@@ -352,7 +338,7 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     stars = message.successful_payment.total_amount
-    product_key = "chat" if payload == "chat_subscription" else payload
+    product_key = payload
 
     username = (
         f"@{message.from_user.username}"
@@ -366,7 +352,7 @@ async def successful_payment(message: Message):
 
     now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%I:%M:%S %p IST")
 
-    payment_type = "subscription" if payload == "chat_subscription" else "one-time"
+    payment_type = "one-time"
     with db_connect() as connection:
         connection.execute(
             "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
@@ -388,8 +374,7 @@ async def successful_payment(message: Message):
 
     await bot.send_message(PAYMENT_CHANNEL_ID, admin_message)
     if product_key == "chat":
-        expiration = getattr(message.successful_payment, "subscription_expiration_date", None)
-        expires_at = datetime.fromtimestamp(expiration, ZoneInfo("Asia/Kolkata")) if expiration else datetime.now(IST) + timedelta(days=30)
+        expires_at = datetime.now(IST) + timedelta(days=30)
         activate_chat(user_id, "Telegram Stars", expires_at)
         await message.answer("✅ Your VIP chat access is active.")
     else:
