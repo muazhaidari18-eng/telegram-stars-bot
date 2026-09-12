@@ -5,7 +5,6 @@ import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import aiogram
-logging.info(f"AIROGRAM VERSION: {aiogram.__version__}")
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
@@ -13,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, LabeledPrice, Mes
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 logging.basicConfig(level=logging.INFO)
+logging.info("AIROGRAM VERSION: %s", aiogram.__version__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
@@ -307,11 +307,9 @@ async def callback_pay_service(query: CallbackQuery) -> None:
 
     try:
         invoice_kwargs = {
-            "chat_id": query.from_user.id,
             "title": product_info["title"],
             "description": product_info["description"],
             "payload": "chat_subscription" if payload_name == "chat" else payload_name,
-            "provider_token": "",
             "currency": "XTR",
             "prices": [
                 LabeledPrice(
@@ -322,9 +320,19 @@ async def callback_pay_service(query: CallbackQuery) -> None:
         }
 
         if payload_name == "chat":
-            invoice_kwargs["subscription_period"] = 2592000
-
-        await bot.send_invoice(**invoice_kwargs)
+            invoice_url = await bot.create_invoice_link(
+                **invoice_kwargs,
+                subscription_period=SUBSCRIPTION_PERIOD,
+            )
+            keyboard = InlineKeyboardBuilder()
+            keyboard.button(text="⭐ Subscribe for 999 Stars / Month", url=invoice_url)
+            await bot.send_message(
+                query.from_user.id,
+                "Tap below to start your 999-Star monthly subscription.",
+                reply_markup=keyboard.as_markup(),
+            )
+        else:
+            await bot.send_invoice(chat_id=query.from_user.id, **invoice_kwargs)
         await query.answer()
     except Exception:
         logging.exception("Failed to create Telegram Stars invoice")
