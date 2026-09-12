@@ -309,19 +309,19 @@ async def callback_pay_service(query: CallbackQuery) -> None:
             "chat_id": query.from_user.id,
             "title": product_info["title"],
             "description": product_info["description"],
-            "payload": payload_name,
+            "payload": "chat_subscription" if payload_name == "chat" else payload_name,
+            "provider_token": "",
             "currency": "XTR",
             "prices": [
                 LabeledPrice(
-                    label=product_info["label"],
-                    amount=product_info["amount"],
+                    label="Chat with Me — 30 Days" if payload_name == "chat" else product_info["label"],
+                    amount=999 if payload_name == "chat" else product_info["amount"],
                 )
             ],
-            "provider_token": "",
         }
 
         if payload_name == "chat":
-            invoice_kwargs["subscription_period"] = SUBSCRIPTION_PERIOD
+            invoice_kwargs["subscription_period"] = 2592000
 
         await bot.send_invoice(**invoice_kwargs)
         await query.answer()
@@ -334,13 +334,16 @@ async def callback_pay_service(query: CallbackQuery) -> None:
 
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await pre_checkout_query.answer(ok=pre_checkout_query.invoice_payload in PRODUCTS)
+    await pre_checkout_query.answer(
+        ok=pre_checkout_query.invoice_payload in {"chat_subscription", "video"}
+    )
 
 
 @dp.message(F.successful_payment)
 async def successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     stars = message.successful_payment.total_amount
+    product_key = "chat" if payload == "chat_subscription" else payload
 
     username = (
         f"@{message.from_user.username}"
@@ -350,15 +353,15 @@ async def successful_payment(message: Message):
 
     user_id = message.from_user.id
 
-    product_name = get_product_name(payload)
+    product_name = get_product_name(product_key)
 
     now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%I:%M:%S %p IST")
 
-    payment_type = "subscription" if payload == "chat" else "one-time"
+    payment_type = "subscription" if payload == "chat_subscription" else "one-time"
     with db_connect() as connection:
         connection.execute(
             "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
-            (message.successful_payment.telegram_payment_charge_id, user_id, payload, stars, payment_type, ist_text()),
+            (message.successful_payment.telegram_payment_charge_id, user_id, product_key, stars, payment_type, ist_text()),
         )
 
     admin_message = f"""
@@ -375,7 +378,7 @@ async def successful_payment(message: Message):
 """
 
     await bot.send_message(PAYMENT_CHANNEL_ID, admin_message)
-    if payload == "chat":
+    if product_key == "chat":
         expiration = getattr(message.successful_payment, "subscription_expiration_date", None)
         expires_at = datetime.fromtimestamp(expiration, ZoneInfo("Asia/Kolkata")) if expiration else datetime.now(IST) + timedelta(days=30)
         activate_chat(user_id, "Telegram Stars", expires_at)
