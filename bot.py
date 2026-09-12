@@ -1,6 +1,8 @@
 import logging
 import os
-from datetime import datetime
+import sqlite3
+import uuid
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
@@ -15,139 +17,41 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
     raise RuntimeError("BOT_TOKEN environment variable is required to run the bot.")
 
-PAYMENT_CHANNEL_ID = int(os.getenv("PAYMENT_CHANNEL_ID"))
+PAYMENT_CHANNEL_ID = int(os.getenv("PAYMENT_CHANNEL_ID", "0"))
+UPI_ID = os.getenv("UPI_ID", "Megha.shaw@ptyes")
+UPI_QR_IMAGE_URL = os.getenv(
+    "UPI_QR_IMAGE_URL",
+    "https://raw.githubusercontent.com/muazhaidari18-eng/telegram-stars-bot/main/Megha-Shaw-UPI.jpeg",
+)
+CHAT_UPI_PRICE = int(os.getenv("CHAT_UPI_PRICE", "1998"))
+VIDEO_UPI_PRICE = int(os.getenv("VIDEO_UPI_PRICE", "9998"))
+DATABASE_PATH = os.getenv("DATABASE_PATH", "payments.sqlite3")
+IST = ZoneInfo("Asia/Kolkata")
+SUBSCRIPTION_PERIOD = 30 * 24 * 60 * 60
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-MAIN_MENU_TEXT = (
-    "💎 Megha Shaw Premium Portal 💎\n\n"
-    "Megha's private inbox is currently reserved for VIP clients. Choose your VIP experience below."
-)
-PRIVATE_CHAT_TEXT = (
-    "Spend some one-on-one time with Megha. Choose your preferred sexting session below."
-)
-VOICE_CALL_TEXT = (
-    "Hear Megha's voice in a private Telegram call. Pick your preferred duration."
-)
-VIDEO_CALL_TEXT = (
-    "Experience Megha live in a private video call. Choose a Standard session or unlock an exclusive "
-    "Custom Outfit experience."
-)
-OUTFIT_MENU_TEXT = "Choose your preferred outfit for your session."
+MAIN_MENU_TEXT = "Welcome cutie... select your VIP access below 🤍✨"
+PRIVATE_CHAT_TEXT = "💬 Chat with Me\n\nStay connected with private VIP chat access.\n\nChoose your payment method:"
+VIDEO_CALL_TEXT = "📹 Book a Private Video Call\n\nBook your private 1-on-1 video call.\n\nChoose your payment method:"
 
 PRODUCTS = {
-    "text_15": {
-        "title": "Touch Yourself With Me (10 Min)",
-        "description": "Pay 500 Stars for Touch Yourself With Me (10 Min)",
-        "amount": 500,
-        "label": "💦 Touch Yourself With Me (10 Min) — ⭐500",
-        "product_name": "Touch Yourself With Me (10 Min)",
+    "chat": {
+        "title": "Chat with Me",
+        "description": "Private VIP chat access for 30 days",
+        "amount": 999,
+        "label": "Chat with Me",
+        "product_name": "Chat with Me",
+        "upi_amount": CHAT_UPI_PRICE,
     },
-    "text_30": {
-        "title": "So Wet & Waiting For You (20 Min)",
-        "description": "Pay 900 Stars for So Wet & Waiting For You (20 Min)",
-        "amount": 900,
-        "label": "❤️ So Wet & Waiting For You (20 Min) — ⭐900",
-        "product_name": "So Wet & Waiting For You (20 Min)",
-    },
-    "text_60": {
-        "title": "Total Devotion: My Clothes Come Off (30 Min)",
-        "description": "Pay 1300 Stars for Total Devotion: My Clothes Come Off (30 Min)",
-        "amount": 1300,
-        "label": "🔥 Total Devotion: My Clothes Come Off (30 Min) — ⭐1300",
-        "product_name": "Total Devotion: My Clothes Come Off (30 Min)",
-    },
-    "voice_10": {
-        "title": "Sweet Talk (10 Minutes)",
-        "description": "Pay 1200 Stars for Sweet Talk (10 Minutes)",
-        "amount": 1200,
-        "label": "💕 Sweet Talk (10 Minutes) — ⭐1200",
-        "product_name": "Sweet Talk (10 Minutes)",
-    },
-    "voice_20": {
-        "title": "Late Night Vibes (20 Minutes)",
-        "description": "Pay 2200 Stars for Late Night Vibes (20 Minutes)",
-        "amount": 2200,
-        "label": "🌙 Late Night Vibes (20 Minutes) — ⭐2200",
-        "product_name": "Late Night Vibes (20 Minutes)",
-    },
-    "voice_30": {
-        "title": "VIP Private Call (30 Minutes)",
-        "description": "Pay 3200 Stars for VIP Private Call (30 Minutes)",
-        "amount": 3200,
-        "label": "👑 VIP Private Call (30 Minutes) — ⭐3200",
-        "product_name": "VIP Private Call (30 Minutes)",
-    },
-    "video_classic_10": {
-        "title": "Classic Video Call (10 Minutes)",
-        "description": "Pay 4000 Stars for Classic Video Call (10 Minutes)",
-        "amount": 4000,
-        "label": "🎥 Classic Video Call (10 Minutes) — ⭐4000",
-        "product_name": "Classic Video Call (10 Minutes)",
-    },
-    "video_premium_15": {
-        "title": "Premium Video Call (15 Minutes)",
-        "description": "Pay 6000 Stars for Premium Video Call (15 Minutes)",
-        "amount": 6000,
-        "label": "💎 Premium Video Call (15 Minutes) — ⭐6000",
-        "product_name": "Premium Video Call (15 Minutes)",
-    },
-    "video_custom_outfit_1_10": {
-        "title": "Custom Outfit Experience (10 Minutes) - Outfit #1",
-        "description": "Pay 6000 Stars for Custom Outfit Experience (10 Minutes) - Outfit #1",
-        "amount": 6000,
-        "label": "👗 Outfit #1 - Custom Outfit Experience",
-        "product_name": "Custom Outfit Experience (10 Minutes) - Outfit #1",
-    },
-    "video_custom_outfit_2_10": {
-        "title": "Custom Outfit Experience (10 Minutes) - Outfit #2",
-        "description": "Pay 6000 Stars for Custom Outfit Experience (10 Minutes) - Outfit #2",
-        "amount": 6000,
-        "label": "👗 Outfit #2 - Custom Outfit Experience",
-        "product_name": "Custom Outfit Experience (10 Minutes) - Outfit #2",
-    },
-    "video_custom_outfit_3_10": {
-        "title": "Custom Outfit Experience (10 Minutes) - Outfit #3",
-        "description": "Pay 6000 Stars for Custom Outfit Experience (10 Minutes) - Outfit #3",
-        "amount": 6000,
-        "label": "👗 Outfit #3 - Custom Outfit Experience",
-        "product_name": "Custom Outfit Experience (10 Minutes) - Outfit #3",
-    },
-    "video_custom_outfit_4_10": {
-        "title": "Custom Outfit Experience (10 Minutes) - Outfit #4",
-        "description": "Pay 6000 Stars for Custom Outfit Experience (10 Minutes) - Outfit #4",
-        "amount": 6000,
-        "label": "👗 Outfit #4 - Custom Outfit Experience",
-        "product_name": "Custom Outfit Experience (10 Minutes) - Outfit #4",
-    },
-    "video_ultimate_outfit_1_15": {
-        "title": "Ultimate VIP Experience (15 Minutes) - Outfit #1",
-        "description": "Pay 8500 Stars for Ultimate VIP Experience (15 Minutes) - Outfit #1",
-        "amount": 8500,
-        "label": "👗 Outfit #1 - Ultimate VIP Experience",
-        "product_name": "Ultimate VIP Experience (15 Minutes) - Outfit #1",
-    },
-    "video_ultimate_outfit_2_15": {
-        "title": "Ultimate VIP Experience (15 Minutes) - Outfit #2",
-        "description": "Pay 8500 Stars for Ultimate VIP Experience (15 Minutes) - Outfit #2",
-        "amount": 8500,
-        "label": "👗 Outfit #2 - Ultimate VIP Experience",
-        "product_name": "Ultimate VIP Experience (15 Minutes) - Outfit #2",
-    },
-    "video_ultimate_outfit_3_15": {
-        "title": "Ultimate VIP Experience (15 Minutes) - Outfit #3",
-        "description": "Pay 8500 Stars for Ultimate VIP Experience (15 Minutes) - Outfit #3",
-        "amount": 8500,
-        "label": "👗 Outfit #3 - Ultimate VIP Experience",
-        "product_name": "Ultimate VIP Experience (15 Minutes) - Outfit #3",
-    },
-    "video_ultimate_outfit_4_15": {
-        "title": "Ultimate VIP Experience (15 Minutes) - Outfit #4",
-        "description": "Pay 8500 Stars for Ultimate VIP Experience (15 Minutes) - Outfit #4",
-        "amount": 8500,
-        "label": "👗 Outfit #4 - Ultimate VIP Experience",
-        "product_name": "Ultimate VIP Experience (15 Minutes) - Outfit #4",
+    "video": {
+        "title": "Private Video Call",
+        "description": "Book a private 1-on-1 video call",
+        "amount": 4999,
+        "label": "Private Video Call",
+        "product_name": "Private Video Call",
+        "upi_amount": VIDEO_UPI_PRICE,
     },
 }
 
@@ -164,11 +68,8 @@ def get_product_name(payload_name: str) -> str:
 def main_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="💬 Sexting Chat", callback_data="private_chat_menu"),
-        InlineKeyboardButton(text="📞 Private Voice Call", callback_data="voice_call_menu"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="🎥 VIP Video Call", callback_data="video_call_menu"),
+        InlineKeyboardButton(text="💬 Chat with Me", callback_data="private_chat_menu"),
+        InlineKeyboardButton(text="📹 Book a Private Video Call", callback_data="video_call_menu"),
     )
     return keyboard
 
@@ -176,30 +77,8 @@ def main_menu_keyboard() -> InlineKeyboardBuilder:
 def private_chat_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="💦 Touch Yourself With Me (10 Min) — ⭐500", callback_data="pay_text_15"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="❤️ So Wet & Waiting For You (20 Min) — ⭐900", callback_data="pay_text_30"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="🔥 Total Devotion: My Clothes Come Off (30 Min) — ⭐1300", callback_data="pay_text_60"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
-    )
-    return keyboard
-
-
-def voice_call_menu_keyboard() -> InlineKeyboardBuilder:
-    keyboard = InlineKeyboardBuilder()
-    keyboard.row(
-        InlineKeyboardButton(text="💕 Sweet Talk (10 Minutes) — ⭐1200", callback_data="pay_voice_10"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="🌙 Late Night Vibes (20 Minutes) — ⭐2200", callback_data="pay_voice_20"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="👑 VIP Private Call (30 Minutes) — ⭐3200", callback_data="pay_voice_30"),
+        InlineKeyboardButton(text="⭐ Pay 999 Stars / Month", callback_data="pay_chat"),
+        InlineKeyboardButton(text="🇮🇳 Pay ₹1,998 via UPI", callback_data="upi_chat"),
     )
     keyboard.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
@@ -210,16 +89,8 @@ def voice_call_menu_keyboard() -> InlineKeyboardBuilder:
 def video_call_menu_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.row(
-        InlineKeyboardButton(text="🎥 Classic Video Call (10 Minutes) — ⭐4000", callback_data="pay_video_classic_10"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="✨ Custom Outfit Experience (10 Minutes) — ⭐6000", callback_data="video_custom_menu"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="💎 Premium Video Call (15 Minutes) — ⭐6000", callback_data="pay_video_premium_15"),
-    )
-    keyboard.row(
-        InlineKeyboardButton(text="🔥 Ultimate VIP Experience (15 Minutes) — ⭐8500", callback_data="video_ultimate_menu"),
+        InlineKeyboardButton(text="⭐ Pay 4,999 Stars", callback_data="pay_video"),
+        InlineKeyboardButton(text="🇮🇳 Pay ₹9,998 via UPI", callback_data="upi_video"),
     )
     keyboard.row(
         InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main"),
@@ -227,37 +98,76 @@ def video_call_menu_keyboard() -> InlineKeyboardBuilder:
     return keyboard
 
 
-def video_outfit_menu_keyboard(variant: str) -> InlineKeyboardBuilder:
+def db_connect() -> sqlite3.Connection:
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_db() -> None:
+    with db_connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY, username TEXT, flow_state TEXT NOT NULL DEFAULT 'idle',
+                flow_context TEXT, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_access (
+                user_id INTEGER PRIMARY KEY, active INTEGER NOT NULL DEFAULT 0,
+                expires_at TEXT NOT NULL, source TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS upi_payments (
+                payment_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, product_key TEXT NOT NULL,
+                amount INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
+                created_at TEXT NOT NULL, verified_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS stars_payments (
+                telegram_charge_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, product_key TEXT NOT NULL,
+                stars INTEGER NOT NULL, payment_type TEXT NOT NULL, paid_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS video_bookings (
+                booking_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, payment_method TEXT NOT NULL,
+                paid TEXT NOT NULL, preferred_date TEXT NOT NULL, preferred_time TEXT NOT NULL, submitted_at TEXT NOT NULL
+            );
+            """
+        )
+
+
+def ist_text() -> str:
+    return datetime.now(IST).strftime("%d-%m-%Y %I:%M:%S %p IST")
+
+
+def set_flow(user_id: int, flow_state: str, context: str | None = None) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """INSERT INTO users (user_id, flow_state, flow_context, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET flow_state=excluded.flow_state,
+            flow_context=excluded.flow_context, updated_at=excluded.updated_at""",
+            (user_id, flow_state, context, ist_text()),
+        )
+
+
+def activate_chat(user_id: int, source: str, expires_at: datetime | None = None) -> None:
+    expires_at = expires_at or datetime.now(IST) + timedelta(days=30)
+    with db_connect() as connection:
+        connection.execute(
+            """INSERT INTO chat_access VALUES (?, 1, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET active=1, expires_at=excluded.expires_at, source=excluded.source""",
+            (user_id, expires_at.isoformat(), source),
+        )
+
+
+def active_chat_access(user_id: int) -> sqlite3.Row | None:
+    with db_connect() as connection:
+        row = connection.execute("SELECT * FROM chat_access WHERE user_id=? AND active=1", (user_id,)).fetchone()
+    if row and datetime.fromisoformat(row["expires_at"]) > datetime.now(IST):
+        return row
+    return None
+
+
+def back_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
-    if variant == "custom":
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #1", callback_data="pay_video_custom_outfit_1_10"),
-        )
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #2", callback_data="pay_video_custom_outfit_2_10"),
-        )
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #3", callback_data="pay_video_custom_outfit_3_10"),
-        )
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #4", callback_data="pay_video_custom_outfit_4_10"),
-        )
-    else:
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #1", callback_data="pay_video_ultimate_outfit_1_15"),
-        )
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #2", callback_data="pay_video_ultimate_outfit_2_15"),
-        )
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #3", callback_data="pay_video_ultimate_outfit_3_15"),
-        )
-        keyboard.row(
-            InlineKeyboardButton(text="👗 Outfit #4", callback_data="pay_video_ultimate_outfit_4_15"),
-        )
-    keyboard.row(
-        InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_video"),
-    )
+    keyboard.button(text="⬅️ Back", callback_data="back_to_main")
     return keyboard
 
 
@@ -269,9 +179,20 @@ async def send_main_menu(message: Message) -> None:
     )
 
 
-@dp.message(Command(commands=["start"]))
+@dp.message(Command(commands=["start", "menu"]))
 async def cmd_start(message: Message) -> None:
+    set_flow(message.from_user.id, "idle")
     await send_main_menu(message)
+
+
+@dp.message(Command("status"))
+async def cmd_status(message: Message) -> None:
+    access = active_chat_access(message.from_user.id)
+    if access:
+        expires = datetime.fromisoformat(access["expires_at"]).strftime("%d-%m-%Y %I:%M %p IST")
+        await message.answer(f"✅ Your Chat with Me access is active until {expires}.")
+    else:
+        await message.answer("Your Chat with Me access is not currently active. You can renew it from /menu.")
 
 
 @dp.callback_query(F.data == "private_chat_menu")
@@ -284,40 +205,94 @@ async def callback_private_chat_menu(query: CallbackQuery) -> None:
     await query.answer()
 
 
-@dp.callback_query(F.data == "voice_call_menu")
-async def callback_voice_call_menu(query: CallbackQuery) -> None:
-    keyboard = voice_call_menu_keyboard().as_markup()
-    await query.message.edit_text(
-        VOICE_CALL_TEXT,
-        reply_markup=keyboard,
-    )
-    await query.answer()
-
-
 @dp.callback_query(F.data == "video_call_menu")
 async def callback_video_call_menu(query: CallbackQuery) -> None:
-    keyboard = video_call_menu_keyboard().as_markup()
     await query.message.edit_text(
         VIDEO_CALL_TEXT,
-        reply_markup=keyboard,
+        reply_markup=video_call_menu_keyboard().as_markup(),
     )
     await query.answer()
 
 
-@dp.callback_query(F.data == "video_custom_menu")
-async def callback_video_custom_menu(query: CallbackQuery) -> None:
-    keyboard = video_outfit_menu_keyboard("custom").as_markup()
-    image_url = "https://raw.githubusercontent.com/muazhaidari18-eng/telegram-stars-bot/refs/heads/main/Dress-Options.png"
-    await query.message.answer_photo(photo=image_url, caption=OUTFIT_MENU_TEXT, reply_markup=keyboard)
+@dp.callback_query(F.data.in_({"upi_chat", "upi_video"}))
+async def callback_upi(query: CallbackQuery) -> None:
+    service = query.data.removeprefix("upi_")
+    product = PRODUCTS[service]
+    set_flow(query.from_user.id, f"upi_{service}")
+    await query.message.answer_photo(
+        photo=UPI_QR_IMAGE_URL,
+        caption=(
+            "🇮🇳 <b>UPI Payment</b>\n\n"
+            f"💰 Amount: ₹{product['upi_amount']:,}\n"
+            f"💳 UPI ID: {UPI_ID}\n\n"
+            "Scan the QR code or pay directly to the UPI ID.\n\n"
+            "After completing the payment, send your payment screenshot here for verification."
+        ),
+        reply_markup=back_keyboard().as_markup(),
+    )
     await query.answer()
 
 
-@dp.callback_query(F.data == "video_ultimate_menu")
-async def callback_video_ultimate_menu(query: CallbackQuery) -> None:
-    keyboard = video_outfit_menu_keyboard("ultimate").as_markup()
-    image_url = "https://raw.githubusercontent.com/muazhaidari18-eng/telegram-stars-bot/refs/heads/main/Dress-Options.png"
-    await query.message.answer_photo(photo=image_url, caption=OUTFIT_MENU_TEXT, reply_markup=keyboard)
-    await query.answer()
+@dp.message(F.photo)
+async def receive_upi_screenshot(message: Message) -> None:
+    user = db_connect()
+    row = user.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
+    user.close()
+    if not row or not row["flow_state"].startswith("upi_"):
+        return
+    service = row["flow_state"].removeprefix("upi_")
+    product = PRODUCTS.get(service)
+    if not product:
+        return
+    payment_id = uuid.uuid4().hex
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT INTO upi_payments VALUES (?, ?, ?, ?, 'pending', ?, NULL)",
+            (payment_id, message.from_user.id, service, product["upi_amount"], ist_text()),
+        )
+    set_flow(message.from_user.id, "idle")
+    username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
+    await bot.send_photo(
+        PAYMENT_CHANNEL_ID,
+        photo=message.photo[-1].file_id,
+        caption=(
+            "💳 <b>UPI PAYMENT VERIFICATION</b>\n\n"
+            f"👤 User: {username}\n🆔 User ID: {message.from_user.id}\n"
+            f"🛍️ Product: {product['product_name']}\n💰 Amount: ₹{product['upi_amount']:,}\n"
+            f"📦 Payment Method: UPI\n⏱️ Time: {ist_text()}\n🧾 Payment ID: {payment_id}"
+        ),
+        reply_markup=(InlineKeyboardBuilder()
+                      .button(text="✅ Approve Payment", callback_data=f"upi_approve:{payment_id}")
+                      .button(text="❌ Reject Payment", callback_data=f"upi_reject:{payment_id}")
+                      .adjust(1).as_markup()),
+    )
+    await message.answer("✅ Screenshot received. Your payment is pending verification.")
+
+
+@dp.callback_query(F.data.startswith("upi_approve:") | F.data.startswith("upi_reject:"))
+async def callback_verify_upi(query: CallbackQuery) -> None:
+    action, payment_id = query.data.split(":", 1)
+    new_status = "approved" if action == "upi_approve" else "rejected"
+    with db_connect() as connection:
+        payment = connection.execute("SELECT * FROM upi_payments WHERE payment_id=?", (payment_id,)).fetchone()
+        if not payment or payment["status"] != "pending":
+            await query.answer("This payment is already processed or does not exist.", show_alert=True)
+            return
+        connection.execute(
+            "UPDATE upi_payments SET status=?, verified_at=? WHERE payment_id=? AND status='pending'",
+            (new_status, ist_text(), payment_id),
+        )
+    await query.answer(f"Payment {new_status}.")
+    await query.message.edit_reply_markup(reply_markup=None)
+    if new_status == "rejected":
+        await bot.send_message(payment["user_id"], "❌ We couldn't verify this payment. Please check the payment details and send a valid payment screenshot again.")
+        return
+    await bot.send_message(payment["user_id"], "✅ Payment verified successfully!")
+    if payment["product_key"] == "chat":
+        activate_chat(payment["user_id"], "UPI")
+    else:
+        set_flow(payment["user_id"], "video_date")
+        await bot.send_message(payment["user_id"], "What date works best for you?", reply_markup=back_keyboard().as_markup())
 
 
 @dp.callback_query(F.data.startswith("pay_"))
@@ -336,12 +311,13 @@ async def callback_pay_service(query: CallbackQuery) -> None:
         payload=payload_name,
         currency="XTR",
         prices=[LabeledPrice(label=product_info["label"], amount=product_info["amount"])],
+        **({"subscription_period": SUBSCRIPTION_PERIOD} if payload_name == "chat" else {}),
     )
 
 
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await pre_checkout_query.answer(ok=True)
+    await pre_checkout_query.answer(ok=pre_checkout_query.invoice_payload in PRODUCTS)
 
 
 @dp.message(F.successful_payment)
@@ -361,6 +337,13 @@ async def successful_payment(message: Message):
 
     now = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%I:%M:%S %p IST")
 
+    payment_type = "subscription" if payload == "chat" else "one-time"
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
+            (message.successful_payment.telegram_payment_charge_id, user_id, payload, stars, payment_type, ist_text()),
+        )
+
     admin_message = f"""
 💰 PAYMENT RECEIVED
 
@@ -369,12 +352,51 @@ async def successful_payment(message: Message):
 
 ⭐ Stars: {stars}
 
-📦 Type: one-time
+📦 Type: {payment_type}
+💳 Method: Telegram Stars
 ⏱️ Time: {now}
 """
 
     await bot.send_message(PAYMENT_CHANNEL_ID, admin_message)
-    await message.answer("✅ Payment received successfully!")
+    if payload == "chat":
+        expiration = getattr(message.successful_payment, "subscription_expiration_date", None)
+        expires_at = datetime.fromtimestamp(expiration, ZoneInfo("Asia/Kolkata")) if expiration else datetime.now(IST) + timedelta(days=30)
+        activate_chat(user_id, "Telegram Stars", expires_at)
+        await message.answer("✅ Your VIP chat access is active.")
+    else:
+        set_flow(user_id, "video_date")
+        await message.answer("✅ Payment received successfully.\n\nWhat date works best for you?", reply_markup=back_keyboard().as_markup())
+
+
+@dp.message(F.text)
+async def video_schedule(message: Message) -> None:
+    row = db_connect()
+    user = row.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
+    row.close()
+    if not user:
+        return
+    if user["flow_state"] == "video_date":
+        set_flow(message.from_user.id, "video_time", message.text)
+        await message.answer("What time works best for you? Please mention your timezone.")
+    elif user["flow_state"] == "video_time":
+        with db_connect() as connection:
+            upi = connection.execute("SELECT * FROM upi_payments WHERE user_id=? AND product_key='video' AND status='approved' ORDER BY verified_at DESC LIMIT 1", (message.from_user.id,)).fetchone()
+            stars = connection.execute("SELECT * FROM stars_payments WHERE user_id=? AND product_key='video' ORDER BY paid_at DESC LIMIT 1", (message.from_user.id,)).fetchone()
+            method = "UPI" if upi and (not stars or upi["verified_at"] >= stars["paid_at"]) else "Telegram Stars"
+            paid = f"₹{upi['amount']:,}" if method == "UPI" else f"{stars['stars']} Stars"
+            connection.execute("INSERT INTO video_bookings VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (uuid.uuid4().hex, message.from_user.id, method, paid, user["flow_context"], message.text, ist_text()))
+        username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
+        await bot.send_message(PAYMENT_CHANNEL_ID, f"""📹 VIDEO CALL BOOKING
+
+👤 User: {username} ({message.from_user.id})
+💳 Payment Method: {method}
+💰 Paid: {paid}
+📅 Preferred Date: {html.escape(user['flow_context'])}
+🕐 Preferred Time: {html.escape(message.text)}
+⏱️ Submitted: {ist_text()}""")
+        set_flow(message.from_user.id, "idle")
+        await message.answer("✅ Your request has been received.")
 
 
 @dp.callback_query(F.data == "back_to_main")
@@ -398,4 +420,5 @@ async def callback_back_to_video(query: CallbackQuery) -> None:
 
 
 if __name__ == "__main__":
+    init_db()
     dp.run_polling(bot)

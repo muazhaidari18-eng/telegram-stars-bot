@@ -9,31 +9,19 @@ bot = importlib.import_module("bot")
 
 
 class MenuPayloadTests(unittest.TestCase):
-    def test_private_chat_payloads_are_available(self):
-        self.assertIsNotNone(bot.get_product_info("text_15"))
-        self.assertIsNotNone(bot.get_product_info("text_30"))
-        self.assertIsNotNone(bot.get_product_info("text_60"))
+    def test_only_new_services_are_available(self):
+        self.assertEqual(set(bot.PRODUCTS), {"chat", "video"})
+        self.assertEqual(bot.get_product_name("chat"), "Chat with Me")
+        self.assertEqual(bot.get_product_name("video"), "Private Video Call")
 
-    def test_voice_call_payloads_are_available(self):
-        self.assertIsNotNone(bot.get_product_info("voice_10"))
-        self.assertIsNotNone(bot.get_product_info("voice_20"))
-        self.assertIsNotNone(bot.get_product_info("voice_30"))
+    def test_fixed_star_and_upi_prices(self):
+        self.assertEqual(bot.PRODUCTS["chat"]["amount"], 999)
+        self.assertEqual(bot.PRODUCTS["chat"]["upi_amount"], 1998)
+        self.assertEqual(bot.PRODUCTS["video"]["amount"], 4999)
+        self.assertEqual(bot.PRODUCTS["video"]["upi_amount"], 9998)
 
-    def test_video_outfit_payloads_are_available(self):
-        self.assertIsNotNone(bot.get_product_info("video_custom_outfit_1_10"))
-        self.assertIsNotNone(bot.get_product_info("video_custom_outfit_2_10"))
-        self.assertIsNotNone(bot.get_product_info("video_ultimate_outfit_1_15"))
-        self.assertIsNotNone(bot.get_product_info("video_ultimate_outfit_2_15"))
-
-    def test_text_products_use_new_sexting_labels(self):
-        self.assertEqual(bot.get_product_info("text_15")["label"], "💦 Touch Yourself With Me (10 Min) — ⭐500")
-        self.assertEqual(bot.get_product_info("text_30")["label"], "❤️ So Wet & Waiting For You (20 Min) — ⭐900")
-        self.assertEqual(bot.get_product_info("text_60")["label"], "🔥 Total Devotion: My Clothes Come Off (30 Min) — ⭐1300")
-
-    def test_admin_product_names_use_new_menu_labels(self):
-        self.assertEqual(bot.get_product_name("text_15"), "Touch Yourself With Me (10 Min)")
-        self.assertEqual(bot.get_product_name("voice_20"), "Late Night Vibes (20 Minutes)")
-        self.assertEqual(bot.get_product_name("video_ultimate_outfit_2_15"), "Ultimate VIP Experience (15 Minutes) - Outfit #2")
+    def test_subscription_period_is_thirty_days(self):
+        self.assertEqual(bot.SUBSCRIPTION_PERIOD, 30 * 24 * 60 * 60)
 
 
 if __name__ == "__main__":
