@@ -304,34 +304,33 @@ async def callback_pay_service(query: CallbackQuery) -> None:
         await query.answer("Payment flow for this product is not implemented yet.", show_alert=True)
         return
 
-try:
-    invoice_kwargs = {
-        "chat_id": query.from_user.id,
-        "title": product_info["title"],
-        "description": product_info["description"],
-        "payload": payload_name,
-        "currency": "XTR",
-        "prices": [
-            LabeledPrice(
-                label=product_info["label"],
-                amount=product_info["amount"]
-            )
-        ],
-        "provider_token": "",
-    }
+    try:
+        invoice_kwargs = {
+            "chat_id": query.from_user.id,
+            "title": product_info["title"],
+            "description": product_info["description"],
+            "payload": payload_name,
+            "currency": "XTR",
+            "prices": [
+                LabeledPrice(
+                    label=product_info["label"],
+                    amount=product_info["amount"],
+                )
+            ],
+            "provider_token": "",
+        }
 
-    if payload_name == "chat":
-        invoice_kwargs["subscription_period"] = 2592000
+        if payload_name == "chat":
+            invoice_kwargs["subscription_period"] = SUBSCRIPTION_PERIOD
 
-    await bot.send_invoice(**invoice_kwargs)
-    await query.answer()
-
-except Exception:
-    logging.exception("Failed to create Telegram Stars invoice")
-    await query.answer(
-        "Unable to open payment right now. Please try again.",
-        show_alert=True
-    )
+        await bot.send_invoice(**invoice_kwargs)
+        await query.answer()
+    except Exception:
+        logging.exception("Failed to create Telegram Stars invoice")
+        await query.answer(
+            "Unable to open payment right now. Please try again.",
+            show_alert=True,
+        )
 
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
