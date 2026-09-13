@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import aiogram
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, LabeledPrice, Message, PreCheckoutQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -298,7 +299,13 @@ async def relay_private_message(message: Message) -> bool:
         if datetime.fromisoformat(session["expires_at"]) <= datetime.now(IST):
             await message.answer("🔒 This customer access has expired, so the message was not sent.")
             return True
-        await bot.copy_message(session["customer_id"], message.chat.id, message.message_id)
+        try:
+            await bot.copy_message(session["customer_id"], message.chat.id, message.message_id)
+        except TelegramBadRequest as error:
+            # Telegram forum service events (topic creation, pinning, etc.) cannot
+            # be copied. They are internal group events, not operator messages.
+            if "message can't be copied" not in str(error):
+                raise
         return True
 
     if is_owner(message.from_user.id):
