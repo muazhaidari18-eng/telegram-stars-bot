@@ -25,6 +25,7 @@ if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
 
 PAYMENT_CHANNEL_ID = int(os.getenv("PAYMENT_CHANNEL_ID", "0"))
 PRIVATE_CHAT_GROUP_ID = int(os.getenv("PRIVATE_CHAT_GROUP_ID", "0"))
+ADMIN_REVIEW_CHAT_ID = PRIVATE_CHAT_GROUP_ID or PAYMENT_CHANNEL_ID
 UPI_ID = os.getenv("UPI_ID", "Megha.shaw@ptyes")
 UPI_QR_IMAGE_URL = os.getenv(
     "UPI_QR_IMAGE_URL",
@@ -538,7 +539,7 @@ async def callback_upi(query: CallbackQuery) -> None:
             f"💰 Amount: ₹{product['upi_amount']:,}\n"
             f"💳 UPI ID: {UPI_ID}\n\n"
             "Scan the QR code or pay directly to the UPI ID.\n\n"
-            "After payment, send the screenshot directly to the channel DM for verification."
+            "After payment, send the screenshot directly here in the bot for verification."
         ),
         reply_markup=back_keyboard().as_markup(),
     )
@@ -565,14 +566,18 @@ async def receive_upi_screenshot(message: Message) -> None:
         )
     set_flow(message.from_user.id, "idle")
     username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
+    if not ADMIN_REVIEW_CHAT_ID:
+        await message.answer("Payment verification is temporarily unavailable. Please contact support.")
+        return
     await bot.send_photo(
-        PAYMENT_CHANNEL_ID,
+        ADMIN_REVIEW_CHAT_ID,
         photo=message.photo[-1].file_id,
         caption=(
             "💳 <b>UPI PAYMENT VERIFICATION</b>\n\n"
             f"👤 User: {username}\n🆔 User ID: {message.from_user.id}\n"
             f"🛍️ Product: {product['product_name']}\n💰 Amount: ₹{product['upi_amount']:,}\n"
-            f"📦 Payment Method: UPI\n⏱️ Time: {ist_text()}\n🧾 Payment ID: {payment_id}"
+            f"📦 Payment Method: UPI\n⏱️ Submitted: {ist_text()}\n🧾 Payment ID: <code>{payment_id}</code>\n\n"
+            "Please confirm the screenshot, then approve or reject this payment."
         ),
         reply_markup=(InlineKeyboardBuilder()
                       .button(text="✅ Approve Payment", callback_data=f"upi_approve:{payment_id}")
@@ -584,6 +589,13 @@ async def receive_upi_screenshot(message: Message) -> None:
 
 @dp.callback_query(F.data.startswith("upi_approve:") | F.data.startswith("upi_reject:"))
 async def callback_verify_upi(query: CallbackQuery) -> None:
+    if not ADMIN_REVIEW_CHAT_ID or query.message.chat.id != ADMIN_REVIEW_CHAT_ID:
+        await query.answer("Payment reviews are only available in the private admin group.", show_alert=True)
+        return
+    reviewer = await bot.get_chat_member(ADMIN_REVIEW_CHAT_ID, query.from_user.id)
+    if reviewer.status not in {"creator", "administrator"}:
+        await query.answer("Only an admin can review payments.", show_alert=True)
+        return
     action, payment_id = query.data.split(":", 1)
     new_status = "approved" if action == "upi_approve" else "rejected"
     with db_connect() as connection:
@@ -596,7 +608,12 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
             (new_status, ist_text(), payment_id),
         )
     await query.answer(f"Payment {new_status}.")
-    await query.message.edit_reply_markup(reply_markup=None)
+    reviewer_name = query.from_user.username and f"@{query.from_user.username}" or query.from_user.full_name
+    status_line = "✅ APPROVED" if new_status == "approved" else "❌ REJECTED"
+    await query.message.edit_caption(
+        caption=f"{query.message.caption}\n\n<b>{status_line}</b> by {html.escape(reviewer_name)} at {ist_text()}",
+        reply_markup=None,
+    )
     if new_status == "rejected":
         await bot.send_message(payment["user_id"], "❌ We couldn't verify this payment. Please check the payment details and send a valid payment screenshot again.")
         return
