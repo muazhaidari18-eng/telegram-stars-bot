@@ -220,6 +220,19 @@ def is_owner(user_id: int) -> bool:
     return secrets.compare_digest(fingerprint, OWNER_USER_HASH)
 
 
+async def is_operator(user_id: int) -> bool:
+    """Allow the owner and administrators of the private operations group."""
+    if is_owner(user_id):
+        return True
+    if not PRIVATE_CHAT_GROUP_ID:
+        return False
+    try:
+        member = await bot.get_chat_member(PRIVATE_CHAT_GROUP_ID, user_id)
+        return member.status in {"creator", "administrator"}
+    except TelegramBadRequest:
+        return False
+
+
 def active_private_session(user_id: int) -> sqlite3.Row | None:
     with db_connect() as connection:
         row = connection.execute(
@@ -405,7 +418,7 @@ async def cmd_myid(message: Message) -> None:
 
 @dp.message(Command("offer"))
 async def cmd_offer(message: Message, command: CommandObject) -> None:
-    if not is_owner(message.from_user.id):
+    if not await is_operator(message.from_user.id):
         await message.answer("This command is not available.")
         return
     try:
@@ -429,8 +442,8 @@ async def cmd_offer(message: Message, command: CommandObject) -> None:
 
 
 async def create_topic_offer(message: Message, command: CommandObject, extend: bool) -> None:
-    if not (is_owner(message.from_user.id) and PRIVATE_CHAT_GROUP_ID and message.chat.id == PRIVATE_CHAT_GROUP_ID and message.message_thread_id):
-        await message.answer("This command is only available to the owner inside an active customer topic.")
+    if not (await is_operator(message.from_user.id) and PRIVATE_CHAT_GROUP_ID and message.chat.id == PRIVATE_CHAT_GROUP_ID and message.message_thread_id):
+        await message.answer("This command is only available to an admin inside an active customer topic.")
         return
     parts = (command.args or "").split(maxsplit=2 if extend else 1)
     try:
