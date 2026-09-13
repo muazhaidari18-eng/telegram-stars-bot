@@ -1,5 +1,8 @@
+import asyncio
+import html
 import logging
 import os
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timedelta
@@ -7,7 +10,7 @@ from zoneinfo import ZoneInfo
 import aiogram
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, LabeledPrice, Message, PreCheckoutQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -27,6 +30,8 @@ UPI_QR_IMAGE_URL = os.getenv(
 CHAT_UPI_PRICE = int(os.getenv("CHAT_UPI_PRICE", "999"))
 VIDEO_UPI_PRICE = int(os.getenv("VIDEO_UPI_PRICE", "4999"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "payments.sqlite3")
+OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
+BOT_USERNAME = os.getenv("BOT_USERNAME", "iLuvMeghabot").lstrip("@")
 IST = ZoneInfo("Asia/Kolkata")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -134,6 +139,23 @@ def init_db() -> None:
                 booking_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, payment_method TEXT NOT NULL,
                 paid TEXT NOT NULL, preferred_date TEXT NOT NULL, preferred_time TEXT NOT NULL, submitted_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS private_offers (
+                token TEXT PRIMARY KEY, created_by INTEGER NOT NULL,
+                stars INTEGER NOT NULL, duration_hours INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('open', 'pending', 'active', 'expired')),
+                claimed_by INTEGER, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS private_sessions (
+                session_code TEXT PRIMARY KEY, offer_token TEXT UNIQUE NOT NULL,
+                customer_id INTEGER NOT NULL, operator_id INTEGER NOT NULL,
+                starts_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('active', 'expired')),
+                expiry_notified INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS relay_messages (
+                operator_message_id INTEGER PRIMARY KEY, session_code TEXT NOT NULL,
+                customer_id INTEGER NOT NULL
+            );
             """
         )
 
@@ -170,6 +192,112 @@ def active_chat_access(user_id: int) -> sqlite3.Row | None:
     return None
 
 
+def active_private_session(user_id: int) -> sqlite3.Row | None:
+    with db_connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM private_sessions WHERE customer_id=? AND status='active' ORDER BY starts_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if row and datetime.fromisoformat(row["expires_at"]) <= datetime.now(IST):
+            connection.execute(
+                "UPDATE private_sessions SET status='expired' WHERE session_code=?",
+                (row["session_code"],),
+            )
+            return None
+    return row
+
+
+def create_private_session(offer: sqlite3.Row, customer_id: int) -> sqlite3.Row:
+    now = datetime.now(IST)
+    expires_at = now + timedelta(hours=offer["duration_hours"])
+    session_code = f"CHAT-{secrets.randbelow(900000) + 100000}"
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT INTO private_sessions (session_code, offer_token, customer_id, operator_id, starts_at, expires_at, status) VALUES (?, ?, ?, ?, ?, ?, 'active')",
+            (session_code, offer["token"], customer_id, offer["created_by"], now.isoformat(), expires_at.isoformat()),
+        )
+        connection.execute("UPDATE private_offers SET status='active' WHERE token=?", (offer["token"],))
+        return connection.execute("SELECT * FROM private_sessions WHERE session_code=?", (session_code,)).fetchone()
+
+
+async def announce_private_session(session: sqlite3.Row) -> None:
+    expiry = datetime.fromisoformat(session["expires_at"]).strftime("%d-%m-%Y %I:%M %p IST")
+    await bot.send_message(
+        session["customer_id"],
+        f"✅ Your private chat is ready.\n\nChat number: <b>{session['session_code']}</b>\nActive until: <b>{expiry}</b>\n\nSend your messages here in the bot.",
+    )
+    await bot.send_message(
+        session["operator_id"],
+        f"🟢 <b>{session['session_code']}</b> started\nUser ID: <code>{session['customer_id']}</code>\nActive until: <b>{expiry}</b>\n\nReply directly to a relayed message to answer this person.",
+    )
+
+
+async def relay_private_message(message: Message) -> bool:
+    if message.from_user.id == OWNER_USER_ID:
+        replied = message.reply_to_message
+        if not replied:
+            return False
+        with db_connect() as connection:
+            mapping = connection.execute(
+                "SELECT * FROM relay_messages WHERE operator_message_id=?",
+                (replied.message_id,),
+            ).fetchone()
+            session = connection.execute(
+                "SELECT * FROM private_sessions WHERE session_code=? AND status='active'",
+                (mapping["session_code"],),
+            ).fetchone() if mapping else None
+        if not mapping or not session:
+            return False
+        if datetime.fromisoformat(session["expires_at"]) <= datetime.now(IST):
+            with db_connect() as connection:
+                connection.execute("UPDATE private_sessions SET status='expired' WHERE session_code=?", (session["session_code"],))
+            await message.answer(f"🔒 {session['session_code']} has expired, so this reply was not sent.")
+            return True
+        await bot.copy_message(mapping["customer_id"], message.chat.id, message.message_id)
+        return True
+
+    session = active_private_session(message.from_user.id)
+    if not session:
+        return False
+    header = await bot.send_message(
+        OWNER_USER_ID,
+        f"💬 <b>{session['session_code']}</b> · reply to the message below",
+    )
+    copied = await bot.copy_message(OWNER_USER_ID, message.chat.id, message.message_id)
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO relay_messages VALUES (?, ?, ?)",
+            (copied.message_id, session["session_code"], message.from_user.id),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO relay_messages VALUES (?, ?, ?)",
+            (header.message_id, session["session_code"], message.from_user.id),
+        )
+    return True
+
+
+async def expiry_monitor() -> None:
+    while True:
+        now = datetime.now(IST)
+        with db_connect() as connection:
+            expired = connection.execute(
+                "SELECT * FROM private_sessions WHERE status='active' AND expires_at<=?",
+                (now.isoformat(),),
+            ).fetchall()
+            for session in expired:
+                connection.execute(
+                    "UPDATE private_sessions SET status='expired', expiry_notified=1 WHERE session_code=?",
+                    (session["session_code"],),
+                )
+        for session in expired:
+            try:
+                await bot.send_message(session["customer_id"], f"🔒 {session['session_code']} has ended. Messages are no longer forwarded.")
+                await bot.send_message(session["operator_id"], f"🔒 {session['session_code']} has expired and is now closed.")
+            except Exception:
+                logging.exception("Failed to send expiry notice for %s", session["session_code"])
+        await asyncio.sleep(60)
+
+
 def back_keyboard() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="⬅️ Back", callback_data="back_to_main")
@@ -184,8 +312,65 @@ async def send_main_menu(message: Message) -> None:
     )
 
 
+@dp.message(Command("myid"))
+async def cmd_myid(message: Message) -> None:
+    await message.answer(f"Your Telegram user ID is: <code>{message.from_user.id}</code>")
+
+
+@dp.message(Command("offer"))
+async def cmd_offer(message: Message, command: CommandObject) -> None:
+    if not OWNER_USER_ID or message.from_user.id != OWNER_USER_ID:
+        await message.answer("This command is not available.")
+        return
+    try:
+        stars_text, hours_text = (command.args or "").split()
+        stars, hours = int(stars_text), int(hours_text)
+        if stars < 0 or stars > 10000 or hours < 1 or hours > 24 * 365:
+            raise ValueError
+    except ValueError:
+        await message.answer("Use: <code>/offer STARS HOURS</code>\nExample test: <code>/offer 0 48</code>")
+        return
+    token = secrets.token_urlsafe(18)
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT INTO private_offers VALUES (?, ?, ?, ?, 'open', NULL, ?)",
+            (token, message.from_user.id, stars, hours, datetime.now(IST).isoformat()),
+        )
+    link = f"https://t.me/{BOT_USERNAME}?start=offer_{token}"
+    price = "free test" if stars == 0 else f"{stars:,} Stars"
+    await message.answer(
+        f"🔐 Private offer created\nPrice: <b>{price}</b>\nAccess: <b>{hours} hours</b>\n\n<code>{link}</code>\n\nThis single-use link is not shown in the public menu."
+    )
+
+
 @dp.message(Command(commands=["start", "menu"]))
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, command: CommandObject) -> None:
+    if command.command == "start" and command.args and command.args.startswith("offer_"):
+        token = command.args.removeprefix("offer_")
+        with db_connect() as connection:
+            offer = connection.execute("SELECT * FROM private_offers WHERE token=?", (token,)).fetchone()
+            if not offer or offer["status"] != "open":
+                await message.answer("This private link is invalid, expired, or has already been used.")
+                return
+            claimed = connection.execute(
+                "UPDATE private_offers SET status='pending', claimed_by=? WHERE token=? AND status='open'",
+                (message.from_user.id, token),
+            ).rowcount
+        if not claimed:
+            await message.answer("This private link has already been used.")
+            return
+        if offer["stars"] == 0:
+            session = create_private_session(offer, message.from_user.id)
+            await announce_private_session(session)
+        else:
+            await bot.send_invoice(
+                chat_id=message.from_user.id,
+                title="Private Chat Access",
+                description=f"Private chat access for {offer['duration_hours']} hours",
+                payload=f"offer_{token}", currency="XTR",
+                prices=[LabeledPrice(label="Private Chat Access", amount=offer["stars"])],
+            )
+        return
     set_flow(message.from_user.id, "idle")
     await send_main_menu(message)
 
@@ -244,6 +429,7 @@ async def receive_upi_screenshot(message: Message) -> None:
     row = user.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
     user.close()
     if not row or not row["flow_state"].startswith("upi_"):
+        await relay_private_message(message)
         return
     service = row["flow_state"].removeprefix("upi_")
     product = PRODUCTS.get(service)
@@ -334,9 +520,18 @@ async def callback_pay_service(query: CallbackQuery) -> None:
 
 @dp.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    await pre_checkout_query.answer(
-        ok=pre_checkout_query.invoice_payload in {"chat", "video"}
-    )
+    payload = pre_checkout_query.invoice_payload
+    if payload in {"chat", "video"}:
+        await pre_checkout_query.answer(ok=True)
+        return
+    if payload.startswith("offer_"):
+        token = payload.removeprefix("offer_")
+        with db_connect() as connection:
+            offer = connection.execute("SELECT * FROM private_offers WHERE token=?", (token,)).fetchone()
+        valid = bool(offer and offer["status"] == "pending" and offer["claimed_by"] == pre_checkout_query.from_user.id and offer["stars"] == pre_checkout_query.total_amount)
+        await pre_checkout_query.answer(ok=valid, error_message=None if valid else "This private offer is no longer available.")
+        return
+    await pre_checkout_query.answer(ok=False, error_message="Unknown payment request.")
 
 
 @dp.message(F.successful_payment)
@@ -344,6 +539,24 @@ async def successful_payment(message: Message):
     payload = message.successful_payment.invoice_payload
     stars = message.successful_payment.total_amount
     product_key = payload
+
+    if payload.startswith("offer_"):
+        token = payload.removeprefix("offer_")
+        with db_connect() as connection:
+            offer = connection.execute("SELECT * FROM private_offers WHERE token=?", (token,)).fetchone()
+        if not offer or offer["status"] != "pending" or offer["claimed_by"] != message.from_user.id or offer["stars"] != stars:
+            logging.error("Paid private offer validation failed for token %s", token)
+            await message.answer("Payment received, but the private session needs manual review. Please contact support.")
+            return
+        with db_connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
+                (message.successful_payment.telegram_payment_charge_id, message.from_user.id, payload, stars, "one-time", ist_text()),
+            )
+        session = create_private_session(offer, message.from_user.id)
+        await announce_private_session(session)
+        await bot.send_message(PAYMENT_CHANNEL_ID, f"💰 PRIVATE OFFER PAID\n\n👤 User ID: {message.from_user.id}\n💬 Chat: {session['session_code']}\n⭐ Stars: {stars}\n⏱️ Time: {ist_text()}")
+        return
 
     username = (
         f"@{message.from_user.username}"
@@ -393,6 +606,7 @@ async def video_schedule(message: Message) -> None:
     user = row.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
     row.close()
     if not user:
+        await relay_private_message(message)
         return
     if user["flow_state"] == "video_date":
         set_flow(message.from_user.id, "video_time", message.text)
@@ -416,6 +630,13 @@ async def video_schedule(message: Message) -> None:
 ⏱️ Submitted: {ist_text()}""")
         set_flow(message.from_user.id, "idle")
         await message.answer("✅ Your request has been received.")
+    else:
+        await relay_private_message(message)
+
+
+@dp.message()
+async def relay_other_messages(message: Message) -> None:
+    await relay_private_message(message)
 
 
 @dp.callback_query(F.data == "back_to_main")
@@ -438,6 +659,11 @@ async def callback_back_to_video(query: CallbackQuery) -> None:
     await query.answer()
 
 
+async def start_background_tasks() -> None:
+    asyncio.create_task(expiry_monitor())
+
+
 if __name__ == "__main__":
     init_db()
+    dp.startup.register(start_background_tasks)
     dp.run_polling(bot)
