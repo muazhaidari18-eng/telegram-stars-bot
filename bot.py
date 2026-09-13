@@ -175,6 +175,9 @@ def init_db() -> None:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(private_sessions)")}
         if "topic_thread_id" not in columns:
             connection.execute("ALTER TABLE private_sessions ADD COLUMN topic_thread_id INTEGER")
+        offer_columns = {row["name"] for row in connection.execute("PRAGMA table_info(private_offers)")}
+        if "description" not in offer_columns:
+            connection.execute("ALTER TABLE private_offers ADD COLUMN description TEXT NOT NULL DEFAULT 'Tip'")
 
 
 def ist_text() -> str:
@@ -250,7 +253,7 @@ def create_standard_chat_session(customer_id: int, source: str) -> sqlite3.Row:
     created_by = OWNER_USER_ID or 0
     with db_connect() as connection:
         connection.execute(
-            "INSERT INTO private_offers VALUES (?, ?, 999, 720, 'open', ?, ?)",
+            "INSERT INTO private_offers (token, created_by, stars, duration_hours, status, claimed_by, created_at, description) VALUES (?, ?, 999, 720, 'open', ?, ?, '30-day private chat')",
             (token, created_by, customer_id, datetime.now(IST).isoformat()),
         )
         offer = connection.execute("SELECT * FROM private_offers WHERE token=?", (token,)).fetchone()
@@ -277,7 +280,7 @@ async def announce_private_session(session: sqlite3.Row) -> None:
             )
         await bot.send_message(
             PRIVATE_CHAT_GROUP_ID,
-            f"🟢 <b>{session['session_code']}</b> started\nCustomer: <b>{html.escape(label)}</b>\nUser ID: <code>{session['customer_id']}</code>\nActive until: <b>{expiry}</b>\n\nReply normally in this topic.\n<code>/tip STARS description</code> sends a tip request.\n<code>/extend STARS HOURS description</code> sells more access.",
+            f"🟢 <b>{session['session_code']}</b> started\nCustomer: <b>{html.escape(label)}</b>\nUser ID: <code>{session['customer_id']}</code>\nActive until: <b>{expiry}</b>\n\nReply normally in this topic.\n<code>/tip STARS description</code> sends a one-time tip request.",
             message_thread_id=topic.message_thread_id,
         )
     else:
@@ -405,23 +408,22 @@ async def cmd_offer(message: Message, command: CommandObject) -> None:
         await message.answer("This command is not available.")
         return
     try:
-        stars_text, hours_text = (command.args or "").split()
-        stars, hours = int(stars_text), int(hours_text)
-        if stars < 0 or stars > 10000 or hours < 1 or hours > 24 * 365:
+        stars_text, description = (command.args or "").split(maxsplit=1)
+        stars = int(stars_text)
+        if stars < 1 or stars > 10000 or not description.strip():
             raise ValueError
     except ValueError:
-        await message.answer("Use: <code>/offer STARS HOURS</code>\nExample test: <code>/offer 0 48</code>")
+        await message.answer("Use: <code>/offer STARS description</code>\nExample: <code>/offer 650 Special tip</code>")
         return
     token = secrets.token_urlsafe(18)
     with db_connect() as connection:
         connection.execute(
-            "INSERT INTO private_offers VALUES (?, ?, ?, ?, 'open', NULL, ?)",
-            (token, message.from_user.id, stars, hours, datetime.now(IST).isoformat()),
+            "INSERT INTO private_offers (token, created_by, stars, duration_hours, status, claimed_by, created_at, description) VALUES (?, ?, ?, 0, 'open', NULL, ?, ?)",
+            (token, message.from_user.id, stars, datetime.now(IST).isoformat(), description.strip()),
         )
     link = f"https://t.me/{BOT_USERNAME}?start=offer_{token}"
-    price = "free test" if stars == 0 else f"{stars:,} Stars"
     await message.answer(
-        f"🔐 Private offer created\nPrice: <b>{price}</b>\nAccess: <b>{hours} hours</b>\n\n<code>{link}</code>\n\nThis single-use link is not shown in the public menu."
+        f"⭐ Custom tip link created\nAmount: <b>{stars:,} Stars</b>\nFor: <b>{html.escape(description.strip())}</b>\n\n<code>{link}</code>\n\nThis single-use link is not shown in the public menu and does not grant chat access."
     )
 
 
@@ -467,11 +469,6 @@ async def cmd_tip(message: Message, command: CommandObject) -> None:
     await create_topic_offer(message, command, extend=False)
 
 
-@dp.message(Command("extend"))
-async def cmd_extend(message: Message, command: CommandObject) -> None:
-    await create_topic_offer(message, command, extend=True)
-
-
 @dp.message(Command(commands=["start", "menu"]))
 async def cmd_start(message: Message, command: CommandObject) -> None:
     if command.command == "start" and command.args and command.args.startswith("offer_"):
@@ -488,17 +485,13 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
         if not claimed:
             await message.answer("This private link has already been used.")
             return
-        if offer["stars"] == 0:
-            session = create_private_session(offer, message.from_user.id)
-            await announce_private_session(session)
-        else:
-            await bot.send_invoice(
-                chat_id=message.from_user.id,
-                title="Private Chat Access",
-                description=f"Private chat access for {offer['duration_hours']} hours",
-                payload=f"offer_{token}", currency="XTR",
-                prices=[LabeledPrice(label="Private Chat Access", amount=offer["stars"])],
-            )
+        await bot.send_invoice(
+            chat_id=message.from_user.id,
+            title="Tip Megha",
+            description=offer["description"][:255],
+            payload=f"offer_{token}", currency="XTR",
+            prices=[LabeledPrice(label="Tip", amount=offer["stars"])],
+        )
         return
     set_flow(message.from_user.id, "idle")
     await send_main_menu(message)
@@ -684,16 +677,20 @@ async def successful_payment(message: Message):
             offer = connection.execute("SELECT * FROM private_offers WHERE token=?", (token,)).fetchone()
         if not offer or offer["status"] != "pending" or offer["claimed_by"] != message.from_user.id or offer["stars"] != stars:
             logging.error("Paid private offer validation failed for token %s", token)
-            await message.answer("Payment received, but the private session needs manual review. Please contact support.")
+            await message.answer("Payment received, but this tip needs manual review. Please contact support.")
             return
         with db_connect() as connection:
+            connection.execute("UPDATE private_offers SET status='active' WHERE token=?", (token,))
             connection.execute(
                 "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
                 (message.successful_payment.telegram_payment_charge_id, message.from_user.id, payload, stars, "one-time", ist_text()),
             )
-        session = create_private_session(offer, message.from_user.id)
-        await announce_private_session(session)
-        await bot.send_message(PAYMENT_CHANNEL_ID, f"💰 PRIVATE OFFER PAID\n\n👤 User ID: {message.from_user.id}\n💬 Chat: {session['session_code']}\n⭐ Stars: {stars}\n⏱️ Time: {ist_text()}")
+        await message.answer("✅ Tip received. Thank you!")
+        if PAYMENT_CHANNEL_ID:
+            await bot.send_message(
+                PAYMENT_CHANNEL_ID,
+                f"💰 CUSTOM TIP PAID\n\n👤 User ID: {message.from_user.id}\n⭐ Stars: {stars}\n📝 For: {html.escape(offer['description'])}\n⏱️ Time: {ist_text()}",
+            )
         return
 
     if payload.startswith("topicoffer_"):
