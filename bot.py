@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import html
 import logging
 import os
@@ -31,6 +32,10 @@ CHAT_UPI_PRICE = int(os.getenv("CHAT_UPI_PRICE", "999"))
 VIDEO_UPI_PRICE = int(os.getenv("VIDEO_UPI_PRICE", "4999"))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "payments.sqlite3")
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0"))
+OWNER_USER_HASH = os.getenv(
+    "OWNER_USER_HASH",
+    "07067902a287da64338c77b0734dd9e8480da7f6f9ef514762a8e765ee159ce6",
+)
 BOT_USERNAME = os.getenv("BOT_USERNAME", "iLuvMeghabot").lstrip("@")
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -192,6 +197,13 @@ def active_chat_access(user_id: int) -> sqlite3.Row | None:
     return None
 
 
+def is_owner(user_id: int) -> bool:
+    if OWNER_USER_ID and user_id == OWNER_USER_ID:
+        return True
+    fingerprint = hashlib.sha256(str(user_id).encode()).hexdigest()
+    return secrets.compare_digest(fingerprint, OWNER_USER_HASH)
+
+
 def active_private_session(user_id: int) -> sqlite3.Row | None:
     with db_connect() as connection:
         row = connection.execute(
@@ -233,7 +245,7 @@ async def announce_private_session(session: sqlite3.Row) -> None:
 
 
 async def relay_private_message(message: Message) -> bool:
-    if message.from_user.id == OWNER_USER_ID:
+    if is_owner(message.from_user.id):
         replied = message.reply_to_message
         if not replied:
             return False
@@ -260,10 +272,10 @@ async def relay_private_message(message: Message) -> bool:
     if not session:
         return False
     header = await bot.send_message(
-        OWNER_USER_ID,
+        session["operator_id"],
         f"💬 <b>{session['session_code']}</b> · reply to the message below",
     )
-    copied = await bot.copy_message(OWNER_USER_ID, message.chat.id, message.message_id)
+    copied = await bot.copy_message(session["operator_id"], message.chat.id, message.message_id)
     with db_connect() as connection:
         connection.execute(
             "INSERT OR REPLACE INTO relay_messages VALUES (?, ?, ?)",
@@ -319,7 +331,7 @@ async def cmd_myid(message: Message) -> None:
 
 @dp.message(Command("offer"))
 async def cmd_offer(message: Message, command: CommandObject) -> None:
-    if not OWNER_USER_ID or message.from_user.id != OWNER_USER_ID:
+    if not is_owner(message.from_user.id):
         await message.answer("This command is not available.")
         return
     try:
