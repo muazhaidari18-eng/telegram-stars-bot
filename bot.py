@@ -23,6 +23,7 @@ if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
     raise RuntimeError("BOT_TOKEN environment variable is required to run the bot.")
 
 PAYMENT_CHANNEL_ID = int(os.getenv("PAYMENT_CHANNEL_ID", "0"))
+PRIVATE_CHAT_GROUP_ID = int(os.getenv("PRIVATE_CHAT_GROUP_ID", "0"))
 UPI_ID = os.getenv("UPI_ID", "Megha.shaw@ptyes")
 UPI_QR_IMAGE_URL = os.getenv(
     "UPI_QR_IMAGE_URL",
@@ -157,12 +158,22 @@ def init_db() -> None:
                 status TEXT NOT NULL CHECK(status IN ('active', 'expired')),
                 expiry_notified INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS topic_offers (
+                token TEXT PRIMARY KEY, session_code TEXT NOT NULL,
+                customer_id INTEGER NOT NULL, stars INTEGER NOT NULL,
+                duration_hours INTEGER NOT NULL DEFAULT 0,
+                description TEXT NOT NULL, status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS relay_messages (
                 operator_message_id INTEGER PRIMARY KEY, session_code TEXT NOT NULL,
                 customer_id INTEGER NOT NULL
             );
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(private_sessions)")}
+        if "topic_thread_id" not in columns:
+            connection.execute("ALTER TABLE private_sessions ADD COLUMN topic_thread_id INTEGER")
 
 
 def ist_text() -> str:
@@ -232,19 +243,64 @@ def create_private_session(offer: sqlite3.Row, customer_id: int) -> sqlite3.Row:
         return connection.execute("SELECT * FROM private_sessions WHERE session_code=?", (session_code,)).fetchone()
 
 
+def create_standard_chat_session(customer_id: int, source: str) -> sqlite3.Row:
+    """Create the operator-side session used after the public 30-day payment."""
+    token = f"standard_{source.lower().replace(' ', '_')}_{uuid.uuid4().hex}"
+    created_by = OWNER_USER_ID or 0
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT INTO private_offers VALUES (?, ?, 999, 720, 'open', ?, ?)",
+            (token, created_by, customer_id, datetime.now(IST).isoformat()),
+        )
+        offer = connection.execute("SELECT * FROM private_offers WHERE token=?", (token,)).fetchone()
+    return create_private_session(offer, customer_id)
+
+
 async def announce_private_session(session: sqlite3.Row) -> None:
     expiry = datetime.fromisoformat(session["expires_at"]).strftime("%d-%m-%Y %I:%M %p IST")
     await bot.send_message(
         session["customer_id"],
         f"✅ Your private chat is ready.\n\nChat number: <b>{session['session_code']}</b>\nActive until: <b>{expiry}</b>\n\nSend your messages here in the bot.",
     )
-    await bot.send_message(
-        session["operator_id"],
-        f"🟢 <b>{session['session_code']}</b> started\nUser ID: <code>{session['customer_id']}</code>\nActive until: <b>{expiry}</b>\n\nReply directly to a relayed message to answer this person.",
-    )
+    if PRIVATE_CHAT_GROUP_ID:
+        user = await bot.get_chat(session["customer_id"])
+        label = user.username and f"@{user.username}" or user.full_name or str(session["customer_id"])
+        topic = await bot.create_forum_topic(
+            PRIVATE_CHAT_GROUP_ID,
+            name=f"🟢 {session['session_code']} · {label}"[:128],
+        )
+        with db_connect() as connection:
+            connection.execute(
+                "UPDATE private_sessions SET topic_thread_id=? WHERE session_code=?",
+                (topic.message_thread_id, session["session_code"]),
+            )
+        await bot.send_message(
+            PRIVATE_CHAT_GROUP_ID,
+            f"🟢 <b>{session['session_code']}</b> started\nCustomer: <b>{html.escape(label)}</b>\nUser ID: <code>{session['customer_id']}</code>\nActive until: <b>{expiry}</b>\n\nReply normally in this topic.\n<code>/tip STARS description</code> sends a tip request.\n<code>/extend STARS HOURS description</code> sells more access.",
+            message_thread_id=topic.message_thread_id,
+        )
+    else:
+        await bot.send_message(
+            session["operator_id"],
+            f"🟢 <b>{session['session_code']}</b> started\nUser ID: <code>{session['customer_id']}</code>\nActive until: <b>{expiry}</b>\n\nReply directly to a relayed message to answer this person.",
+        )
 
 
 async def relay_private_message(message: Message) -> bool:
+    if PRIVATE_CHAT_GROUP_ID and message.chat.id == PRIVATE_CHAT_GROUP_ID and message.message_thread_id:
+        with db_connect() as connection:
+            session = connection.execute(
+                "SELECT * FROM private_sessions WHERE topic_thread_id=? AND status='active'",
+                (message.message_thread_id,),
+            ).fetchone()
+        if not session:
+            return False
+        if datetime.fromisoformat(session["expires_at"]) <= datetime.now(IST):
+            await message.answer("🔒 This customer access has expired, so the message was not sent.")
+            return True
+        await bot.copy_message(session["customer_id"], message.chat.id, message.message_id)
+        return True
+
     if is_owner(message.from_user.id):
         replied = message.reply_to_message
         if not replied:
@@ -271,11 +327,14 @@ async def relay_private_message(message: Message) -> bool:
     session = active_private_session(message.from_user.id)
     if not session:
         return False
+    destination = PRIVATE_CHAT_GROUP_ID or session["operator_id"]
+    thread_id = session["topic_thread_id"] if PRIVATE_CHAT_GROUP_ID else None
     header = await bot.send_message(
-        session["operator_id"],
-        f"💬 <b>{session['session_code']}</b> · reply to the message below",
+        destination,
+        f"💬 <b>{session['session_code']}</b>",
+        message_thread_id=thread_id,
     )
-    copied = await bot.copy_message(session["operator_id"], message.chat.id, message.message_id)
+    copied = await bot.copy_message(destination, message.chat.id, message.message_id, message_thread_id=thread_id)
     with db_connect() as connection:
         connection.execute(
             "INSERT OR REPLACE INTO relay_messages VALUES (?, ?, ?)",
@@ -304,7 +363,11 @@ async def expiry_monitor() -> None:
         for session in expired:
             try:
                 await bot.send_message(session["customer_id"], f"🔒 {session['session_code']} has ended. Messages are no longer forwarded.")
-                await bot.send_message(session["operator_id"], f"🔒 {session['session_code']} has expired and is now closed.")
+                if PRIVATE_CHAT_GROUP_ID and session["topic_thread_id"]:
+                    await bot.send_message(PRIVATE_CHAT_GROUP_ID, f"🔒 {session['session_code']} has expired and is now closed.", message_thread_id=session["topic_thread_id"])
+                    await bot.close_forum_topic(PRIVATE_CHAT_GROUP_ID, session["topic_thread_id"])
+                else:
+                    await bot.send_message(session["operator_id"], f"🔒 {session['session_code']} has expired and is now closed.")
             except Exception:
                 logging.exception("Failed to send expiry notice for %s", session["session_code"])
         await asyncio.sleep(60)
@@ -353,6 +416,53 @@ async def cmd_offer(message: Message, command: CommandObject) -> None:
     await message.answer(
         f"🔐 Private offer created\nPrice: <b>{price}</b>\nAccess: <b>{hours} hours</b>\n\n<code>{link}</code>\n\nThis single-use link is not shown in the public menu."
     )
+
+
+async def create_topic_offer(message: Message, command: CommandObject, extend: bool) -> None:
+    if not (is_owner(message.from_user.id) and PRIVATE_CHAT_GROUP_ID and message.chat.id == PRIVATE_CHAT_GROUP_ID and message.message_thread_id):
+        await message.answer("This command is only available to the owner inside an active customer topic.")
+        return
+    parts = (command.args or "").split(maxsplit=2 if extend else 1)
+    try:
+        stars = int(parts[0])
+        hours = int(parts[1]) if extend else 0
+        description = parts[2] if extend and len(parts) > 2 else (parts[1] if not extend and len(parts) > 1 else ("Extra private-chat access" if extend else "Tip"))
+        if stars < 1 or stars > 10000 or hours < 0 or hours > 24 * 365:
+            raise ValueError
+    except (ValueError, IndexError):
+        usage = "/extend STARS HOURS description" if extend else "/tip STARS description"
+        await message.answer(f"Use: <code>{usage}</code>")
+        return
+    with db_connect() as connection:
+        session = connection.execute(
+            "SELECT * FROM private_sessions WHERE topic_thread_id=? AND status='active'",
+            (message.message_thread_id,),
+        ).fetchone()
+    if not session:
+        await message.answer("This topic does not have an active customer session.")
+        return
+    token = secrets.token_urlsafe(12)
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT INTO topic_offers VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (token, session["session_code"], session["customer_id"], stars, hours, description, datetime.now(IST).isoformat()),
+        )
+    await bot.send_invoice(
+        chat_id=session["customer_id"], title=("Extend Private Access" if extend else "Tip Megha"),
+        description=description[:255], payload=f"topicoffer_{token}", currency="XTR",
+        prices=[LabeledPrice(label=description[:32], amount=stars)],
+    )
+    await message.answer(f"✅ Sent <b>{stars:,} Stars</b> request to the customer: {html.escape(description)}")
+
+
+@dp.message(Command("tip"))
+async def cmd_tip(message: Message, command: CommandObject) -> None:
+    await create_topic_offer(message, command, extend=False)
+
+
+@dp.message(Command("extend"))
+async def cmd_extend(message: Message, command: CommandObject) -> None:
+    await create_topic_offer(message, command, extend=True)
 
 
 @dp.message(Command(commands=["start", "menu"]))
@@ -493,6 +603,8 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
     await bot.send_message(payment["user_id"], "✅ Payment verified successfully!")
     if payment["product_key"] == "chat":
         activate_chat(payment["user_id"], "UPI")
+        session = create_standard_chat_session(payment["user_id"], "UPI")
+        await announce_private_session(session)
     else:
         set_flow(payment["user_id"], "video_date")
         await bot.send_message(payment["user_id"], "What date works best for you?", reply_markup=back_keyboard().as_markup())
@@ -543,6 +655,13 @@ async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
         valid = bool(offer and offer["status"] == "pending" and offer["claimed_by"] == pre_checkout_query.from_user.id and offer["stars"] == pre_checkout_query.total_amount)
         await pre_checkout_query.answer(ok=valid, error_message=None if valid else "This private offer is no longer available.")
         return
+    if payload.startswith("topicoffer_"):
+        token = payload.removeprefix("topicoffer_")
+        with db_connect() as connection:
+            offer = connection.execute("SELECT * FROM topic_offers WHERE token=?", (token,)).fetchone()
+        valid = bool(offer and offer["status"] == "pending" and offer["customer_id"] == pre_checkout_query.from_user.id and offer["stars"] == pre_checkout_query.total_amount)
+        await pre_checkout_query.answer(ok=valid, error_message=None if valid else "This offer is no longer available.")
+        return
     await pre_checkout_query.answer(ok=False, error_message="Unknown payment request.")
 
 
@@ -568,6 +687,29 @@ async def successful_payment(message: Message):
         session = create_private_session(offer, message.from_user.id)
         await announce_private_session(session)
         await bot.send_message(PAYMENT_CHANNEL_ID, f"💰 PRIVATE OFFER PAID\n\n👤 User ID: {message.from_user.id}\n💬 Chat: {session['session_code']}\n⭐ Stars: {stars}\n⏱️ Time: {ist_text()}")
+        return
+
+    if payload.startswith("topicoffer_"):
+        token = payload.removeprefix("topicoffer_")
+        with db_connect() as connection:
+            offer = connection.execute("SELECT * FROM topic_offers WHERE token=?", (token,)).fetchone()
+            if not offer or offer["status"] != "pending" or offer["customer_id"] != message.from_user.id or offer["stars"] != stars:
+                await message.answer("Payment received, but this offer needs manual review.")
+                return
+            connection.execute("UPDATE topic_offers SET status='paid' WHERE token=?", (token,))
+            session = connection.execute("SELECT * FROM private_sessions WHERE session_code=?", (offer["session_code"],)).fetchone()
+            if offer["duration_hours"] and session:
+                current_expiry = max(datetime.fromisoformat(session["expires_at"]), datetime.now(IST))
+                new_expiry = current_expiry + timedelta(hours=offer["duration_hours"])
+                connection.execute("UPDATE private_sessions SET expires_at=? WHERE session_code=?", (new_expiry.isoformat(), session["session_code"]))
+            connection.execute(
+                "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
+                (message.successful_payment.telegram_payment_charge_id, message.from_user.id, payload, stars, "one-time", ist_text()),
+            )
+        await message.answer("✅ Payment received. Thank you!")
+        if session and PRIVATE_CHAT_GROUP_ID and session["topic_thread_id"]:
+            detail = f" · access extended by {offer['duration_hours']} hours" if offer["duration_hours"] else ""
+            await bot.send_message(PRIVATE_CHAT_GROUP_ID, f"💰 <b>{stars:,} Stars paid</b>{detail}\n{html.escape(offer['description'])}", message_thread_id=session["topic_thread_id"])
         return
 
     username = (
@@ -606,7 +748,8 @@ async def successful_payment(message: Message):
     if product_key == "chat":
         expires_at = datetime.now(IST) + timedelta(days=30)
         activate_chat(user_id, "Telegram Stars", expires_at)
-        await message.answer("✅ Your VIP chat access is active.")
+        session = create_standard_chat_session(user_id, "Telegram Stars")
+        await announce_private_session(session)
     else:
         set_flow(user_id, "video_date")
         await message.answer("✅ Payment received successfully.\n\nWhat date works best for you?", reply_markup=back_keyboard().as_markup())
