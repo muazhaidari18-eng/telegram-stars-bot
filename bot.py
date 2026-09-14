@@ -26,6 +26,13 @@ if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
 PAYMENT_CHANNEL_ID = int(os.getenv("PAYMENT_CHANNEL_ID", "0"))
 PRIVATE_CHAT_GROUP_ID = int(os.getenv("PRIVATE_CHAT_GROUP_ID", "0"))
 ADMIN_REVIEW_CHAT_ID = PRIVATE_CHAT_GROUP_ID or PAYMENT_CHANNEL_ID
+PAYMENT_REVIEW_TOPIC_ID = int(os.getenv("PAYMENT_REVIEW_TOPIC_ID", "0"))
+PAYMENT_FULFILMENT_TOPIC_ID = int(os.getenv("PAYMENT_FULFILMENT_TOPIC_ID", "0"))
+PAYMENT_APPROVER_USER_IDS = {
+    int(user_id.strip())
+    for user_id in os.getenv("PAYMENT_APPROVER_USER_IDS", "").split(",")
+    if user_id.strip()
+}
 UPI_ID = os.getenv("UPI_ID", "Megha.shaw@ptyes")
 UPI_QR_IMAGE_URL = os.getenv(
     "UPI_QR_IMAGE_URL",
@@ -116,8 +123,16 @@ def video_call_menu_keyboard() -> InlineKeyboardBuilder:
     return keyboard
 
 
+class ManagedConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def db_connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DATABASE_PATH)
+    connection = sqlite3.connect(DATABASE_PATH, factory=ManagedConnection)
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -138,6 +153,12 @@ def init_db() -> None:
                 payment_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, product_key TEXT NOT NULL,
                 amount INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected')),
                 created_at TEXT NOT NULL, verified_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS payment_workflow_settings (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS payment_approvers (
+                user_id INTEGER PRIMARY KEY, added_by INTEGER NOT NULL, added_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS stars_payments (
                 telegram_charge_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, product_key TEXT NOT NULL,
@@ -179,6 +200,50 @@ def init_db() -> None:
         offer_columns = {row["name"] for row in connection.execute("PRAGMA table_info(private_offers)")}
         if "description" not in offer_columns:
             connection.execute("ALTER TABLE private_offers ADD COLUMN description TEXT NOT NULL DEFAULT 'Tip'")
+        payment_columns = {row["name"] for row in connection.execute("PRAGMA table_info(upi_payments)")}
+        for name, definition in (
+            ("screenshot_file_id", "TEXT"),
+            ("review_message_id", "INTEGER"),
+            ("reviewed_by", "INTEGER"),
+            ("reviewed_by_name", "TEXT"),
+            ("fulfilment_message_id", "INTEGER"),
+            ("fulfilment_status", "TEXT NOT NULL DEFAULT 'not_ready'"),
+            ("fulfilment_error", "TEXT"),
+            ("fulfilment_attempted_at", "TEXT"),
+        ):
+            if name not in payment_columns:
+                connection.execute(f"ALTER TABLE upi_payments ADD COLUMN {name} {definition}")
+
+
+def workflow_setting(key: str, default: int = 0) -> int:
+    with db_connect() as connection:
+        row = connection.execute(
+            "SELECT value FROM payment_workflow_settings WHERE key=?", (key,)
+        ).fetchone()
+    return int(row["value"]) if row else default
+
+
+def set_workflow_setting(key: str, value: int) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            """INSERT INTO payment_workflow_settings (key, value, updated_at)
+            VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET
+            value=excluded.value, updated_at=excluded.updated_at""",
+            (key, str(value), ist_text()),
+        )
+
+
+def payment_fulfilment_topic_id() -> int:
+    return PAYMENT_FULFILMENT_TOPIC_ID or workflow_setting("payment_fulfilment_topic_id")
+
+
+def is_payment_approver(user_id: int) -> bool:
+    if user_id in PAYMENT_APPROVER_USER_IDS:
+        return True
+    with db_connect() as connection:
+        return connection.execute(
+            "SELECT 1 FROM payment_approvers WHERE user_id=?", (user_id,)
+        ).fetchone() is not None
 
 
 def ist_text() -> str:
@@ -416,6 +481,99 @@ async def cmd_myid(message: Message) -> None:
     await message.answer(f"Your Telegram user ID is: <code>{message.from_user.id}</code>")
 
 
+@dp.message(Command("setup_payment_handoff"))
+async def cmd_setup_payment_handoff(message: Message) -> None:
+    """Create Priya's private fulfilment topic once and persist its thread ID."""
+    if not is_owner(message.from_user.id):
+        await message.answer("This command is only available to the owner.")
+        return
+    if not ADMIN_REVIEW_CHAT_ID or message.chat.id != ADMIN_REVIEW_CHAT_ID:
+        await message.answer("Run this inside the Megha paid chat payments group.")
+        return
+    existing = payment_fulfilment_topic_id()
+    if existing:
+        await message.answer(
+            f"✅ Priya fulfilment is already configured in topic <code>{existing}</code>."
+        )
+        return
+    try:
+        topic = await bot.create_forum_topic(
+            ADMIN_REVIEW_CHAT_ID,
+            name="✅ Approved Payments — Priya",
+        )
+    except TelegramBadRequest as error:
+        logging.exception("Unable to create payment fulfilment topic")
+        await message.answer(
+            "I couldn't create the topic. Make sure this group has Topics enabled and "
+            "the bot is an admin with Manage Topics permission."
+        )
+        return
+    set_workflow_setting("payment_fulfilment_topic_id", topic.message_thread_id)
+    await bot.send_message(
+        ADMIN_REVIEW_CHAT_ID,
+        (
+            "✅ <b>Priya fulfilment queue is ready.</b>\n\n"
+            "Only payments explicitly approved by Megha will appear here. Each handoff "
+            "will include the buyer ID, product, amount, payment ID, approver, and the "
+            "submitted screenshot. Pending and rejected payments will never be forwarded."
+        ),
+        message_thread_id=topic.message_thread_id,
+    )
+    await message.answer(
+        f"✅ Payment handoff configured. Priya topic ID: <code>{topic.message_thread_id}</code>."
+    )
+
+
+@dp.message(Command("set_payment_approver"))
+async def cmd_set_payment_approver(message: Message, command: CommandObject) -> None:
+    """Owner-only: authorize Megha by replying to her message or supplying her user ID."""
+    if not is_owner(message.from_user.id):
+        await message.answer("This command is only available to the owner.")
+        return
+    target_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    elif command.args:
+        try:
+            target_id = int(command.args.strip())
+        except ValueError:
+            target_id = None
+    if not target_id:
+        await message.answer(
+            "Reply to Megha's message with <code>/set_payment_approver</code>, or use "
+            "<code>/set_payment_approver USER_ID</code>."
+        )
+        return
+    with db_connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO payment_approvers VALUES (?, ?, ?)",
+            (target_id, message.from_user.id, ist_text()),
+        )
+    await message.answer(
+        f"✅ User <code>{target_id}</code> is now authorized to approve payments for Priya handoff."
+    )
+
+
+@dp.message(Command("payment_handoff_status"))
+async def cmd_payment_handoff_status(message: Message) -> None:
+    if not is_owner(message.from_user.id):
+        await message.answer("This command is only available to the owner.")
+        return
+    with db_connect() as connection:
+        approvers = [
+            str(row["user_id"])
+            for row in connection.execute("SELECT user_id FROM payment_approvers ORDER BY user_id")
+        ]
+    approvers.extend(str(user_id) for user_id in sorted(PAYMENT_APPROVER_USER_IDS))
+    approvers = sorted(set(approvers))
+    await message.answer(
+        "💳 <b>Payment handoff status</b>\n\n"
+        f"Priya topic ID: <code>{payment_fulfilment_topic_id() or 'not configured'}</code>\n"
+        f"Authorized approver IDs: <code>{', '.join(approvers) or 'none configured'}</code>\n\n"
+        "No payment is sent to Priya until an authorized approver presses Approve."
+    )
+
+
 @dp.message(Command("offer"))
 async def cmd_offer(message: Message, command: CommandObject) -> None:
     if not await is_operator(message.from_user.id):
@@ -559,6 +717,82 @@ async def callback_upi(query: CallbackQuery) -> None:
     await query.answer()
 
 
+async def deliver_payment_handoff(payment_id: str) -> bool:
+    """Deliver one approved UPI payment to Priya's topic, with retry-safe state."""
+    topic_id = payment_fulfilment_topic_id()
+    if not ADMIN_REVIEW_CHAT_ID or not topic_id:
+        logging.error("Priya fulfilment topic is not configured for payment %s", payment_id)
+        return False
+    with db_connect() as connection:
+        payment = connection.execute(
+            "SELECT * FROM upi_payments WHERE payment_id=?", (payment_id,)
+        ).fetchone()
+        if not payment or payment["status"] != "approved":
+            return False
+        if payment["fulfilment_message_id"]:
+            return True
+        claimed = connection.execute(
+            """UPDATE upi_payments SET fulfilment_status='sending',
+            fulfilment_attempted_at=?, fulfilment_error=NULL
+            WHERE payment_id=? AND fulfilment_message_id IS NULL
+              AND fulfilment_status IN ('pending', 'failed')""",
+            (ist_text(), payment_id),
+        ).rowcount
+        if claimed != 1:
+            return False
+    product = PRODUCTS.get(payment["product_key"], {})
+    try:
+        handoff = await bot.send_photo(
+            ADMIN_REVIEW_CHAT_ID,
+            photo=payment["screenshot_file_id"],
+            caption=(
+                "✅ <b>PAYMENT CONFIRMED — ACTION FOR PRIYA</b>\n\n"
+                f"🆔 Buyer/User ID: <code>{payment['user_id']}</code>\n"
+                f"🛍️ Product: {html.escape(product.get('product_name', payment['product_key']))}\n"
+                f"💰 Amount: ₹{payment['amount']:,}\n"
+                f"🧾 Payment ID: <code>{payment_id}</code>\n"
+                f"✅ Approved by: {html.escape(payment['reviewed_by_name'] or str(payment['reviewed_by']))}\n"
+                f"⏱️ Approved: {payment['verified_at']}\n\n"
+                "Priya: please begin fulfilment for this confirmed payment."
+            ),
+            message_thread_id=topic_id,
+        )
+    except Exception as error:
+        logging.exception("Failed to deliver approved payment %s to Priya", payment_id)
+        with db_connect() as connection:
+            connection.execute(
+                "UPDATE upi_payments SET fulfilment_status='failed', fulfilment_error=? WHERE payment_id=?",
+                (str(error)[:1000], payment_id),
+            )
+        return False
+    with db_connect() as connection:
+        connection.execute(
+            """UPDATE upi_payments SET fulfilment_message_id=?,
+            fulfilment_status='sent', fulfilment_error=NULL WHERE payment_id=?""",
+            (handoff.message_id, payment_id),
+        )
+    return True
+
+
+async def payment_handoff_monitor() -> None:
+    """Retry transient handoff failures without touching pending/rejected payments."""
+    while True:
+        if payment_fulfilment_topic_id():
+            with db_connect() as connection:
+                pending_ids = [
+                    row["payment_id"]
+                    for row in connection.execute(
+                        """SELECT payment_id FROM upi_payments
+                        WHERE status='approved' AND fulfilment_message_id IS NULL
+                          AND fulfilment_status IN ('pending', 'failed')
+                        ORDER BY verified_at LIMIT 20"""
+                    )
+                ]
+            for pending_id in pending_ids:
+                await deliver_payment_handoff(pending_id)
+        await asyncio.sleep(60)
+
+
 @dp.message(F.photo)
 async def receive_upi_screenshot(message: Message) -> None:
     user = db_connect()
@@ -574,15 +808,25 @@ async def receive_upi_screenshot(message: Message) -> None:
     payment_id = uuid.uuid4().hex
     with db_connect() as connection:
         connection.execute(
-            "INSERT INTO upi_payments VALUES (?, ?, ?, ?, 'pending', ?, NULL)",
-            (payment_id, message.from_user.id, service, product["upi_amount"], ist_text()),
+            """INSERT INTO upi_payments
+            (payment_id, user_id, product_key, amount, status, created_at, verified_at,
+             screenshot_file_id, fulfilment_status)
+            VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, 'not_ready')""",
+            (
+                payment_id,
+                message.from_user.id,
+                service,
+                product["upi_amount"],
+                ist_text(),
+                message.photo[-1].file_id,
+            ),
         )
     set_flow(message.from_user.id, "idle")
     username = f"@{message.from_user.username}" if message.from_user.username else "No Username"
     if not ADMIN_REVIEW_CHAT_ID:
         await message.answer("Payment verification is temporarily unavailable. Please contact support.")
         return
-    await bot.send_photo(
+    review_message = await bot.send_photo(
         ADMIN_REVIEW_CHAT_ID,
         photo=message.photo[-1].file_id,
         caption=(
@@ -596,7 +840,13 @@ async def receive_upi_screenshot(message: Message) -> None:
                       .button(text="✅ Approve Payment", callback_data=f"upi_approve:{payment_id}")
                       .button(text="❌ Reject Payment", callback_data=f"upi_reject:{payment_id}")
                       .adjust(1).as_markup()),
+        **({"message_thread_id": PAYMENT_REVIEW_TOPIC_ID} if PAYMENT_REVIEW_TOPIC_ID else {}),
     )
+    with db_connect() as connection:
+        connection.execute(
+            "UPDATE upi_payments SET review_message_id=? WHERE payment_id=?",
+            (review_message.message_id, payment_id),
+        )
     await message.answer("✅ Screenshot received. Your payment is pending verification.")
 
 
@@ -605,23 +855,27 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
     if not ADMIN_REVIEW_CHAT_ID or query.message.chat.id != ADMIN_REVIEW_CHAT_ID:
         await query.answer("Payment reviews are only available in the private admin group.", show_alert=True)
         return
-    reviewer = await bot.get_chat_member(ADMIN_REVIEW_CHAT_ID, query.from_user.id)
-    if reviewer.status not in {"creator", "administrator"}:
-        await query.answer("Only an admin can review payments.", show_alert=True)
+    if not is_payment_approver(query.from_user.id):
+        await query.answer("Only Megha can approve or reject payments.", show_alert=True)
         return
     action, payment_id = query.data.split(":", 1)
     new_status = "approved" if action == "upi_approve" else "rejected"
+    reviewer_name = query.from_user.username and f"@{query.from_user.username}" or query.from_user.full_name
     with db_connect() as connection:
         payment = connection.execute("SELECT * FROM upi_payments WHERE payment_id=?", (payment_id,)).fetchone()
         if not payment or payment["status"] != "pending":
             await query.answer("This payment is already processed or does not exist.", show_alert=True)
             return
-        connection.execute(
-            "UPDATE upi_payments SET status=?, verified_at=? WHERE payment_id=? AND status='pending'",
-            (new_status, ist_text(), payment_id),
+        changed = connection.execute(
+            """UPDATE upi_payments SET status=?, verified_at=?, reviewed_by=?, reviewed_by_name=?,
+            fulfilment_status=CASE WHEN ?='approved' THEN 'pending' ELSE 'not_ready' END
+            WHERE payment_id=? AND status='pending'""",
+            (new_status, ist_text(), query.from_user.id, reviewer_name, new_status, payment_id),
         )
+        if changed.rowcount != 1:
+            await query.answer("This payment was already processed.", show_alert=True)
+            return
     await query.answer(f"Payment {new_status}.")
-    reviewer_name = query.from_user.username and f"@{query.from_user.username}" or query.from_user.full_name
     status_line = "✅ APPROVED" if new_status == "approved" else "❌ REJECTED"
     await query.message.edit_caption(
         caption=f"{query.message.caption}\n\n<b>{status_line}</b> by {html.escape(reviewer_name)} at {ist_text()}",
@@ -630,6 +884,7 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
     if new_status == "rejected":
         await bot.send_message(payment["user_id"], "❌ We couldn't verify this payment. Please check the payment details and send a valid payment screenshot again.")
         return
+    await deliver_payment_handoff(payment_id)
     await bot.send_message(payment["user_id"], "✅ Payment verified successfully!")
     if payment["product_key"] == "chat":
         activate_chat(payment["user_id"], "UPI")
@@ -850,6 +1105,7 @@ async def callback_back_to_video(query: CallbackQuery) -> None:
 
 async def start_background_tasks() -> None:
     asyncio.create_task(expiry_monitor())
+    asyncio.create_task(payment_handoff_monitor())
 
 
 if __name__ == "__main__":
