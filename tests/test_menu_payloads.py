@@ -1,5 +1,7 @@
 import importlib
+import gc
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -63,6 +65,64 @@ class StarsPaymentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("subscription_period", send_invoice.await_args.kwargs)
         self.assertNotIn("provider_token", send_invoice.await_args.kwargs)
 
+
+class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        handle = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        handle.close()
+        self.database_path = handle.name
+        self.original_database_path = bot.DATABASE_PATH
+        self.original_review_chat_id = bot.ADMIN_REVIEW_CHAT_ID
+        self.original_topic_id = bot.PAYMENT_FULFILMENT_TOPIC_ID
+        bot.DATABASE_PATH = self.database_path
+        bot.ADMIN_REVIEW_CHAT_ID = -1004438876540
+        bot.PAYMENT_FULFILMENT_TOPIC_ID = 77
+        bot.init_db()
+
+    def tearDown(self):
+        bot.DATABASE_PATH = self.original_database_path
+        bot.ADMIN_REVIEW_CHAT_ID = self.original_review_chat_id
+        bot.PAYMENT_FULFILMENT_TOPIC_ID = self.original_topic_id
+        gc.collect()
+        os.unlink(self.database_path)
+
+    async def test_only_approved_payment_is_handed_off_once(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at,
+                 verified_at, screenshot_file_id, reviewed_by, reviewed_by_name,
+                 fulfilment_status)
+                VALUES ('pay-1', 42, 'chat', 999, 'approved', 'now', 'now',
+                        'photo-file', 7, 'Megha', 'pending')"""
+            )
+        sent = SimpleNamespace(message_id=123)
+        with patch.object(bot.bot, "send_photo", AsyncMock(return_value=sent)) as send_photo:
+            self.assertTrue(await bot.deliver_payment_handoff("pay-1"))
+            self.assertTrue(await bot.deliver_payment_handoff("pay-1"))
+
+        send_photo.assert_awaited_once()
+        self.assertEqual(send_photo.await_args.kwargs["message_thread_id"], 77)
+        self.assertIn("Buyer/User ID", send_photo.await_args.kwargs["caption"])
+        with bot.db_connect() as connection:
+            row = connection.execute(
+                "SELECT fulfilment_status, fulfilment_message_id FROM upi_payments WHERE payment_id='pay-1'"
+            ).fetchone()
+        self.assertEqual(row["fulfilment_status"], "sent")
+        self.assertEqual(row["fulfilment_message_id"], 123)
+
+    async def test_pending_payment_is_never_handed_off(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at,
+                 screenshot_file_id, fulfilment_status)
+                VALUES ('pay-2', 42, 'chat', 999, 'pending', 'now',
+                        'photo-file', 'not_ready')"""
+            )
+        with patch.object(bot.bot, "send_photo", AsyncMock()) as send_photo:
+            self.assertFalse(await bot.deliver_payment_handoff("pay-2"))
+        send_photo.assert_not_awaited()
 
 if __name__ == "__main__":
     unittest.main()
