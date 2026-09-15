@@ -513,7 +513,7 @@ async def cmd_setup_payment_handoff(message: Message) -> None:
         ADMIN_REVIEW_CHAT_ID,
         (
             "✅ <b>Priya fulfilment queue is ready.</b>\n\n"
-            "Only payments explicitly approved by Megha will appear here. Each handoff "
+            "Only payments explicitly approved by an authorized approver will appear here. Each handoff "
             "will include the buyer ID, product, amount, payment ID, approver, and the "
             "submitted screenshot. Pending and rejected payments will never be forwarded."
         ),
@@ -526,7 +526,7 @@ async def cmd_setup_payment_handoff(message: Message) -> None:
 
 @dp.message(Command("set_payment_approver"))
 async def cmd_set_payment_approver(message: Message, command: CommandObject) -> None:
-    """Owner-only: authorize Megha by replying to her message or supplying her user ID."""
+    """Owner-only: authorize a payment approver by replying to their message or supplying their user ID."""
     if not is_owner(message.from_user.id):
         await message.answer("This command is only available to the owner.")
         return
@@ -540,7 +540,7 @@ async def cmd_set_payment_approver(message: Message, command: CommandObject) -> 
             target_id = None
     if not target_id:
         await message.answer(
-            "Reply to Megha's message with <code>/set_payment_approver</code>, or use "
+            "Reply to the approver's message with <code>/set_payment_approver</code>, or use "
             "<code>/set_payment_approver USER_ID</code>."
         )
         return
@@ -856,7 +856,7 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
         await query.answer("Payment reviews are only available in the private admin group.", show_alert=True)
         return
     if not is_payment_approver(query.from_user.id):
-        await query.answer("Only Megha can approve or reject payments.", show_alert=True)
+        await query.answer("Only authorized approvers can approve or reject payments.", show_alert=True)
         return
     action, payment_id = query.data.split(":", 1)
     new_status = "approved" if action == "upi_approve" else "rejected"

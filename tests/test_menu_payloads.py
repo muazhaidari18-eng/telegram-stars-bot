@@ -124,5 +124,23 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await bot.deliver_payment_handoff("pay-2"))
         send_photo.assert_not_awaited()
 
+    async def test_handoff_uses_actual_approver_name(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at,
+                 verified_at, screenshot_file_id, reviewed_by, reviewed_by_name,
+                 fulfilment_status)
+                VALUES ('pay-3', 42, 'chat', 999, 'approved', 'now', 'now',
+                        'photo-file', 1001, '@ash_ops', 'pending')"""
+            )
+        sent = SimpleNamespace(message_id=124)
+        with patch.object(bot.bot, "send_photo", AsyncMock(return_value=sent)) as send_photo:
+            self.assertTrue(await bot.deliver_payment_handoff("pay-3"))
+
+        caption = send_photo.await_args.kwargs["caption"]
+        self.assertIn("Approved by: @ash_ops", caption)
+        self.assertNotIn("Only payments explicitly approved by Megha", caption)
+
 if __name__ == "__main__":
     unittest.main()
