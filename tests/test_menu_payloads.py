@@ -94,8 +94,10 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.original_database_path = bot.DATABASE_PATH
         self.original_review_chat_id = bot.ADMIN_REVIEW_CHAT_ID
         self.original_topic_id = bot.PAYMENT_FULFILMENT_TOPIC_ID
+        self.original_private_chat_group_id = bot.PRIVATE_CHAT_GROUP_ID
         bot.DATABASE_PATH = self.database_path
         bot.ADMIN_REVIEW_CHAT_ID = -1004438876540
+        bot.PRIVATE_CHAT_GROUP_ID = -1004438876540
         bot.PAYMENT_FULFILMENT_TOPIC_ID = 77
         bot.init_db()
 
@@ -103,6 +105,7 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
         bot.DATABASE_PATH = self.original_database_path
         bot.ADMIN_REVIEW_CHAT_ID = self.original_review_chat_id
         bot.PAYMENT_FULFILMENT_TOPIC_ID = self.original_topic_id
+        bot.PRIVATE_CHAT_GROUP_ID = self.original_private_chat_group_id
         gc.collect()
         os.unlink(self.database_path)
 
@@ -242,6 +245,60 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(bot.pending_upi_payment(42, "chat")["payment_id"], "pay-5")
         self.assertIsNone(bot.pending_upi_payment(42, "video"))
+
+    async def test_topic_tip_allows_15000_stars(self):
+        session_code = "CHAT-150000"
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO private_sessions
+                (session_code, offer_token, customer_id, operator_id, starts_at,
+                 expires_at, status, topic_thread_id)
+                VALUES (?, ?, 42, 7, 'now', '2999-01-01T00:00:00+05:30',
+                        'active', 77)""",
+                (session_code, "offer-token"),
+            )
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=7),
+            chat=SimpleNamespace(id=-1004438876540),
+            message_thread_id=77,
+            answer=AsyncMock(),
+        )
+        command = SimpleNamespace(args="15000 Video call")
+        with patch.object(bot, "is_operator", AsyncMock(return_value=True)):
+            with patch.object(bot.bot, "send_invoice", AsyncMock()) as send_invoice:
+                await bot.create_topic_offer(message, command, extend=False)
+
+        send_invoice.assert_awaited_once()
+        self.assertEqual(send_invoice.await_args.kwargs["chat_id"], 42)
+        self.assertEqual(send_invoice.await_args.kwargs["prices"][0].amount, 15000)
+        message.answer.assert_awaited_once()
+        self.assertIn("15,000 Stars", message.answer.await_args.args[0])
+
+    async def test_customer_relay_does_not_send_repeated_session_header(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO private_sessions
+                (session_code, offer_token, customer_id, operator_id, starts_at,
+                 expires_at, status, topic_thread_id)
+                VALUES ('CHAT-301214', 'offer-token', 42, 7, 'now',
+                        '2999-01-01T00:00:00+05:30', 'active', 77)"""
+            )
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42),
+            chat=SimpleNamespace(id=42),
+            message_id=555,
+        )
+        copied = SimpleNamespace(message_id=777)
+        with patch.object(bot.bot, "send_message", AsyncMock()) as send_message:
+            with patch.object(bot.bot, "copy_message", AsyncMock(return_value=copied)) as copy_message:
+                self.assertTrue(await bot.relay_private_message(message))
+
+        send_message.assert_not_awaited()
+        copy_message.assert_awaited_once()
+        with bot.db_connect() as connection:
+            mappings = connection.execute("SELECT * FROM relay_messages").fetchall()
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0]["operator_message_id"], 777)
 
 if __name__ == "__main__":
     unittest.main()

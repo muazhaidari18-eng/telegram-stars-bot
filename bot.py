@@ -526,20 +526,11 @@ async def relay_private_message(message: Message) -> bool:
         return False
     destination = PRIVATE_CHAT_GROUP_ID or session["operator_id"]
     thread_id = session["topic_thread_id"] if PRIVATE_CHAT_GROUP_ID else None
-    header = await bot.send_message(
-        destination,
-        f"💬 <b>{session['session_code']}</b>",
-        message_thread_id=thread_id,
-    )
     copied = await bot.copy_message(destination, message.chat.id, message.message_id, message_thread_id=thread_id)
     with db_connect() as connection:
         connection.execute(
             "INSERT OR REPLACE INTO relay_messages VALUES (?, ?, ?)",
             (copied.message_id, session["session_code"], message.from_user.id),
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO relay_messages VALUES (?, ?, ?)",
-            (header.message_id, session["session_code"], message.from_user.id),
         )
     return True
 
@@ -690,7 +681,7 @@ async def cmd_offer(message: Message, command: CommandObject) -> None:
     try:
         stars_text, description = (command.args or "").split(maxsplit=1)
         stars = int(stars_text)
-        if stars < 1 or stars > 10000 or not description.strip():
+        if stars < 1 or not description.strip():
             raise ValueError
     except ValueError:
         await message.answer("Use: <code>/offer STARS description</code>\nExample: <code>/offer 650 Special tip</code>")
@@ -716,7 +707,7 @@ async def create_topic_offer(message: Message, command: CommandObject, extend: b
         stars = int(parts[0])
         hours = int(parts[1]) if extend else 0
         description = parts[2] if extend and len(parts) > 2 else (parts[1] if not extend and len(parts) > 1 else ("Extra private-chat access" if extend else "Tip"))
-        if stars < 1 or stars > 10000 or hours < 0 or hours > 24 * 365:
+        if stars < 1 or hours < 0 or hours > 24 * 365:
             raise ValueError
     except (ValueError, IndexError):
         usage = "/extend STARS HOURS description" if extend else "/tip STARS description"
