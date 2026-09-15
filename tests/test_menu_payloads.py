@@ -132,6 +132,11 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["fulfilment_status"], "sent")
         self.assertEqual(row["fulfilment_message_id"], 123)
 
+    async def test_payment_group_admin_can_review_payment(self):
+        member = SimpleNamespace(status="administrator")
+        with patch.object(bot.bot, "get_chat_member", AsyncMock(return_value=member)):
+            self.assertTrue(await bot.can_review_payment(9090))
+
     async def test_pending_payment_is_never_handed_off(self):
         with bot.db_connect() as connection:
             connection.execute(

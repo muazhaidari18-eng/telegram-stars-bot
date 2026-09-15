@@ -249,6 +249,18 @@ def is_payment_approver(user_id: int) -> bool:
         ).fetchone() is not None
 
 
+async def can_review_payment(user_id: int) -> bool:
+    if is_payment_approver(user_id):
+        return True
+    if not ADMIN_REVIEW_CHAT_ID:
+        return False
+    try:
+        member = await bot.get_chat_member(ADMIN_REVIEW_CHAT_ID, user_id)
+        return member.status in {"creator", "administrator"}
+    except TelegramBadRequest:
+        return False
+
+
 def display_name(user) -> str:
     return user.username and f"@{user.username}" or user.full_name or str(user.id)
 
@@ -862,18 +874,18 @@ async def payment_handoff_monitor() -> None:
         await asyncio.sleep(60)
 
 
-@dp.message(Command("recover_upi_approval"))
+@dp.message(Command(commands=["recover", "rup", "recover_upi_approval"]))
 async def cmd_recover_upi_approval(message: Message) -> None:
     """Approve an older UPI review message when its callback row is missing."""
     if not ADMIN_REVIEW_CHAT_ID or message.chat.id != ADMIN_REVIEW_CHAT_ID:
         await message.answer("Run this inside the private payment review group.")
         return
-    if not is_payment_approver(message.from_user.id):
+    if not await can_review_payment(message.from_user.id):
         await message.answer("Only authorized approvers can recover and approve payments.")
         return
     replied = message.reply_to_message
     if not replied or not replied.photo or not replied.caption:
-        await message.answer("Reply to the old UPI payment verification photo with /recover_upi_approval.")
+        await message.answer("Reply to the old UPI payment verification photo with /recover.")
         return
     parsed = parse_upi_review_caption(replied.caption)
     if not parsed:
@@ -1049,7 +1061,7 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
     if not ADMIN_REVIEW_CHAT_ID or query.message.chat.id != ADMIN_REVIEW_CHAT_ID:
         await query.answer("Payment reviews are only available in the private admin group.", show_alert=True)
         return
-    if not is_payment_approver(query.from_user.id):
+    if not await can_review_payment(query.from_user.id):
         await query.answer("Only authorized approvers can approve or reject payments.", show_alert=True)
         return
     action, payment_id = query.data.split(":", 1)
