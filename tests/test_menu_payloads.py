@@ -32,6 +32,26 @@ class MenuPayloadTests(unittest.TestCase):
             bot.PRIVATE_CHAT_TEXT.index("Choose your payment method"),
         )
 
+    def test_old_upi_review_caption_can_be_recovered(self):
+        parsed = bot.parse_upi_review_caption(
+            "💳 UPI PAYMENT VERIFICATION\n\n"
+            "👤 User: @buyer\n🆔 User ID: 987654321\n"
+            "🛍️ Product: Chat with Me\n💰 Amount: ₹999\n"
+            "📦 Payment Method: UPI\n⏱️ Submitted: now\n"
+            "🧾 Payment ID: abc123\n\n"
+            "Please confirm the screenshot, then approve or reject this payment."
+        )
+
+        self.assertEqual(parsed["payment_id"], "abc123")
+        self.assertEqual(parsed["user_id"], 987654321)
+        self.assertEqual(parsed["product_key"], "chat")
+        self.assertEqual(parsed["amount"], 999)
+        self.assertEqual(parsed["buyer_username"], "@buyer")
+
+    def test_display_name_prefers_username(self):
+        user = SimpleNamespace(id=55, username="ash_ops", full_name="Ash")
+        self.assertEqual(bot.display_name(user), "@ash_ops")
+
 class StarsPaymentFlowTests(unittest.IsolatedAsyncioTestCase):
     def query(self, payload):
         return SimpleNamespace(
@@ -91,10 +111,11 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(
                 """INSERT INTO upi_payments
                 (payment_id, user_id, product_key, amount, status, created_at,
-                 verified_at, screenshot_file_id, reviewed_by, reviewed_by_name,
-                 fulfilment_status)
+                 verified_at, screenshot_file_id, buyer_username, buyer_full_name,
+                 reviewed_by, reviewed_by_name, fulfilment_status)
                 VALUES ('pay-1', 42, 'chat', 999, 'approved', 'now', 'now',
-                        'photo-file', 7, 'Megha', 'pending')"""
+                        'photo-file', '@buyer42', 'Buyer 42', 7, 'Megha',
+                        'pending')"""
             )
         sent = SimpleNamespace(message_id=123)
         with patch.object(bot.bot, "send_photo", AsyncMock(return_value=sent)) as send_photo:
@@ -129,10 +150,11 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(
                 """INSERT INTO upi_payments
                 (payment_id, user_id, product_key, amount, status, created_at,
-                 verified_at, screenshot_file_id, reviewed_by, reviewed_by_name,
-                 fulfilment_status)
+                 verified_at, screenshot_file_id, buyer_username, buyer_full_name,
+                 reviewed_by, reviewed_by_name, fulfilment_status)
                 VALUES ('pay-3', 42, 'chat', 999, 'approved', 'now', 'now',
-                        'photo-file', 1001, '@ash_ops', 'pending')"""
+                        'photo-file', '@buyer42', 'Buyer 42', 1001, '@ash_ops',
+                        'pending')"""
             )
         sent = SimpleNamespace(message_id=124)
         with patch.object(bot.bot, "send_photo", AsyncMock(return_value=sent)) as send_photo:
@@ -141,6 +163,38 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
         caption = send_photo.await_args.kwargs["caption"]
         self.assertIn("Approved by: @ash_ops", caption)
         self.assertNotIn("Only payments explicitly approved by Megha", caption)
+
+    async def test_handoff_includes_buyer_identity_and_profile_link(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at,
+                 verified_at, screenshot_file_id, buyer_username, buyer_full_name,
+                 reviewed_by, reviewed_by_name, fulfilment_status)
+                VALUES ('pay-4', 4242, 'chat', 999, 'approved', 'now', 'now',
+                        'photo-file', '@buyername', 'Buyer Name', 1001, '@megha',
+                        'pending')"""
+            )
+        sent = SimpleNamespace(message_id=125)
+        with patch.object(bot.bot, "send_photo", AsyncMock(return_value=sent)) as send_photo:
+            self.assertTrue(await bot.deliver_payment_handoff("pay-4"))
+
+        caption = send_photo.await_args.kwargs["caption"]
+        self.assertIn("Buyer: @buyername", caption)
+        self.assertIn('tg://user?id=4242', caption)
+
+    def test_pending_upi_payment_finds_existing_pending_review(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at,
+                 screenshot_file_id, fulfilment_status)
+                VALUES ('pay-5', 42, 'chat', 999, 'pending', 'now',
+                        'photo-file', 'not_ready')"""
+            )
+
+        self.assertEqual(bot.pending_upi_payment(42, "chat")["payment_id"], "pay-5")
+        self.assertIsNone(bot.pending_upi_payment(42, "video"))
 
 if __name__ == "__main__":
     unittest.main()

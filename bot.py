@@ -3,6 +3,7 @@ import hashlib
 import html
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import uuid
@@ -204,6 +205,8 @@ def init_db() -> None:
         for name, definition in (
             ("screenshot_file_id", "TEXT"),
             ("review_message_id", "INTEGER"),
+            ("buyer_username", "TEXT"),
+            ("buyer_full_name", "TEXT"),
             ("reviewed_by", "INTEGER"),
             ("reviewed_by_name", "TEXT"),
             ("fulfilment_message_id", "INTEGER"),
@@ -244,6 +247,70 @@ def is_payment_approver(user_id: int) -> bool:
         return connection.execute(
             "SELECT 1 FROM payment_approvers WHERE user_id=?", (user_id,)
         ).fetchone() is not None
+
+
+def display_name(user) -> str:
+    return user.username and f"@{user.username}" or user.full_name or str(user.id)
+
+
+def product_key_from_name(product_name: str) -> str | None:
+    normalized = product_name.strip().casefold()
+    for key, product in PRODUCTS.items():
+        if product["product_name"].casefold() == normalized:
+            return key
+    return None
+
+
+def parse_upi_review_caption(caption: str) -> dict[str, int | str] | None:
+    plain = re.sub(r"<[^>]+>", "", html.unescape(caption or ""))
+    buyer_match = re.search(r"User:\s*(.+)", plain, re.IGNORECASE)
+    user_id_match = re.search(r"User ID:\s*(\d+)", plain, re.IGNORECASE)
+    product_match = re.search(r"Product:\s*(.+)", plain, re.IGNORECASE)
+    amount_match = re.search(r"Amount:\s*₹?\s*([\d,]+)", plain, re.IGNORECASE)
+    payment_id_match = re.search(r"Payment ID:\s*([A-Za-z0-9_-]+)", plain, re.IGNORECASE)
+    if not all((user_id_match, product_match, amount_match, payment_id_match)):
+        return None
+    product_key = product_key_from_name(product_match.group(1).strip())
+    if not product_key:
+        return None
+    buyer_label = buyer_match.group(1).strip() if buyer_match else ""
+    buyer_username = buyer_label if buyer_label.startswith("@") else ""
+    buyer_full_name = "" if buyer_username or buyer_label == "No Username" else buyer_label
+    return {
+        "payment_id": payment_id_match.group(1),
+        "user_id": int(user_id_match.group(1)),
+        "product_key": product_key,
+        "amount": int(amount_match.group(1).replace(",", "")),
+        "buyer_username": buyer_username,
+        "buyer_full_name": buyer_full_name,
+    }
+
+
+async def buyer_identity(payment: sqlite3.Row) -> dict[str, str]:
+    username = payment["buyer_username"] if "buyer_username" in payment.keys() else None
+    full_name = payment["buyer_full_name"] if "buyer_full_name" in payment.keys() else None
+    if not username and not full_name:
+        try:
+            chat = await bot.get_chat(payment["user_id"])
+            username = chat.username and f"@{chat.username}" or None
+            full_name = chat.full_name
+        except Exception:
+            logging.info("Could not fetch buyer identity for %s", payment["user_id"])
+    label = username or full_name or "Unknown username"
+    return {
+        "label": label,
+        "profile_link": f'<a href="tg://user?id={payment["user_id"]}">Open Telegram profile</a>',
+    }
+
+
+def pending_upi_payment(user_id: int, product_key: str) -> sqlite3.Row | None:
+    with db_connect() as connection:
+        return connection.execute(
+            """SELECT * FROM upi_payments
+            WHERE user_id=? AND product_key=? AND status='pending'
+            ORDER BY created_at DESC LIMIT 1""",
+            (user_id, product_key),
+        ).fetchone()
 
 
 def ist_text() -> str:
@@ -741,13 +808,15 @@ async def deliver_payment_handoff(payment_id: str) -> bool:
         if claimed != 1:
             return False
     product = PRODUCTS.get(payment["product_key"], {})
+    buyer = await buyer_identity(payment)
     try:
         handoff = await bot.send_photo(
             ADMIN_REVIEW_CHAT_ID,
             photo=payment["screenshot_file_id"],
             caption=(
                 "✅ <b>PAYMENT CONFIRMED — ACTION FOR PRIYA</b>\n\n"
-                f"🆔 Buyer/User ID: <code>{payment['user_id']}</code>\n"
+                f"👤 Buyer: {html.escape(buyer['label'])}\n"
+                f"🆔 Buyer/User ID: <code>{payment['user_id']}</code> · {buyer['profile_link']}\n"
                 f"🛍️ Product: {html.escape(product.get('product_name', payment['product_key']))}\n"
                 f"💰 Amount: ₹{payment['amount']:,}\n"
                 f"🧾 Payment ID: <code>{payment_id}</code>\n"
@@ -793,6 +862,121 @@ async def payment_handoff_monitor() -> None:
         await asyncio.sleep(60)
 
 
+@dp.message(Command("recover_upi_approval"))
+async def cmd_recover_upi_approval(message: Message) -> None:
+    """Approve an older UPI review message when its callback row is missing."""
+    if not ADMIN_REVIEW_CHAT_ID or message.chat.id != ADMIN_REVIEW_CHAT_ID:
+        await message.answer("Run this inside the private payment review group.")
+        return
+    if not is_payment_approver(message.from_user.id):
+        await message.answer("Only authorized approvers can recover and approve payments.")
+        return
+    replied = message.reply_to_message
+    if not replied or not replied.photo or not replied.caption:
+        await message.answer("Reply to the old UPI payment verification photo with /recover_upi_approval.")
+        return
+    parsed = parse_upi_review_caption(replied.caption)
+    if not parsed:
+        await message.answer("I could not read the payment details from that old review message.")
+        return
+
+    payment_id = str(parsed["payment_id"])
+    reviewer_name = display_name(message.from_user)
+    approved_at = ist_text()
+    notify_customer = False
+    with db_connect() as connection:
+        existing = connection.execute(
+            "SELECT * FROM upi_payments WHERE payment_id=?", (payment_id,)
+        ).fetchone()
+        if existing and existing["status"] == "approved":
+            connection.execute(
+                """UPDATE upi_payments SET verified_at=COALESCE(verified_at, ?),
+                screenshot_file_id=COALESCE(screenshot_file_id, ?),
+                buyer_username=COALESCE(buyer_username, ?),
+                buyer_full_name=COALESCE(buyer_full_name, ?),
+                reviewed_by=?, reviewed_by_name=?,
+                fulfilment_status=CASE
+                    WHEN fulfilment_message_id IS NULL THEN 'pending'
+                    ELSE fulfilment_status
+                END
+                WHERE payment_id=?""",
+                (
+                    approved_at,
+                    replied.photo[-1].file_id,
+                    parsed["buyer_username"] or None,
+                    parsed["buyer_full_name"] or None,
+                    message.from_user.id,
+                    reviewer_name,
+                    payment_id,
+                ),
+            )
+        elif existing:
+            connection.execute(
+                """UPDATE upi_payments SET status='approved', verified_at=?,
+                screenshot_file_id=?, buyer_username=?, buyer_full_name=?,
+                reviewed_by=?, reviewed_by_name=?,
+                fulfilment_status='pending', fulfilment_error=NULL
+                WHERE payment_id=?""",
+                (
+                    approved_at,
+                    replied.photo[-1].file_id,
+                    parsed["buyer_username"] or None,
+                    parsed["buyer_full_name"] or None,
+                    message.from_user.id,
+                    reviewer_name,
+                    payment_id,
+                ),
+            )
+            notify_customer = True
+        else:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at, verified_at,
+                 screenshot_file_id, review_message_id, buyer_username, buyer_full_name,
+                 reviewed_by, reviewed_by_name, fulfilment_status)
+                VALUES (?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                (
+                    payment_id,
+                    parsed["user_id"],
+                    parsed["product_key"],
+                    parsed["amount"],
+                    approved_at,
+                    approved_at,
+                    replied.photo[-1].file_id,
+                    replied.message_id,
+                    parsed["buyer_username"] or None,
+                    parsed["buyer_full_name"] or None,
+                    message.from_user.id,
+                    reviewer_name,
+                ),
+            )
+            notify_customer = True
+
+    try:
+        await replied.edit_caption(
+            caption=f"{replied.caption}\n\n<b>✅ APPROVED</b> by {html.escape(reviewer_name)} at {approved_at}",
+            reply_markup=None,
+        )
+    except TelegramBadRequest:
+        logging.info("Could not edit recovered UPI review message %s", replied.message_id)
+
+    delivered = await deliver_payment_handoff(payment_id)
+    if not delivered:
+        await message.answer("Payment was approved, but Priya handoff is not configured or failed. The monitor will retry if possible.")
+        return
+
+    if notify_customer:
+        await bot.send_message(parsed["user_id"], "✅ Payment verified successfully!")
+        if parsed["product_key"] == "chat":
+            activate_chat(parsed["user_id"], "UPI")
+            session = create_standard_chat_session(parsed["user_id"], "UPI")
+            await announce_private_session(session)
+        else:
+            set_flow(parsed["user_id"], "video_date")
+            await bot.send_message(parsed["user_id"], "What date works best for you?", reply_markup=back_keyboard().as_markup())
+    await message.answer(f"✅ Payment recovered, approved by {html.escape(reviewer_name)}, and sent to Priya.")
+
+
 @dp.message(F.photo)
 async def receive_upi_screenshot(message: Message) -> None:
     user = db_connect()
@@ -805,13 +989,21 @@ async def receive_upi_screenshot(message: Message) -> None:
     product = PRODUCTS.get(service)
     if not product:
         return
+    existing_pending = pending_upi_payment(message.from_user.id, service)
+    if existing_pending:
+        await message.answer(
+            "✅ Your payment screenshot is already pending verification. Please wait for approval before sending another screenshot."
+        )
+        return
     payment_id = uuid.uuid4().hex
+    buyer_username = f"@{message.from_user.username}" if message.from_user.username else None
+    buyer_full_name = message.from_user.full_name
     with db_connect() as connection:
         connection.execute(
             """INSERT INTO upi_payments
             (payment_id, user_id, product_key, amount, status, created_at, verified_at,
-             screenshot_file_id, fulfilment_status)
-            VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, 'not_ready')""",
+             screenshot_file_id, buyer_username, buyer_full_name, fulfilment_status)
+            VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, ?, ?, 'not_ready')""",
             (
                 payment_id,
                 message.from_user.id,
@@ -819,6 +1011,8 @@ async def receive_upi_screenshot(message: Message) -> None:
                 product["upi_amount"],
                 ist_text(),
                 message.photo[-1].file_id,
+                buyer_username,
+                buyer_full_name,
             ),
         )
     set_flow(message.from_user.id, "idle")
@@ -860,7 +1054,7 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
         return
     action, payment_id = query.data.split(":", 1)
     new_status = "approved" if action == "upi_approve" else "rejected"
-    reviewer_name = query.from_user.username and f"@{query.from_user.username}" or query.from_user.full_name
+    reviewer_name = display_name(query.from_user)
     with db_connect() as connection:
         payment = connection.execute("SELECT * FROM upi_payments WHERE payment_id=?", (payment_id,)).fetchone()
         if not payment or payment["status"] != "pending":
