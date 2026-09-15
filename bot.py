@@ -240,6 +240,35 @@ def payment_fulfilment_topic_id() -> int:
     return PAYMENT_FULFILMENT_TOPIC_ID or workflow_setting("payment_fulfilment_topic_id")
 
 
+async def ensure_payment_fulfilment_topic() -> int | None:
+    existing = payment_fulfilment_topic_id()
+    if existing:
+        return existing
+    if not ADMIN_REVIEW_CHAT_ID:
+        return None
+    try:
+        topic = await bot.create_forum_topic(
+            ADMIN_REVIEW_CHAT_ID,
+            name="✅ Approved Payments — Priya",
+        )
+    except TelegramBadRequest:
+        logging.exception("Unable to auto-create Priya fulfilment topic")
+        return None
+    set_workflow_setting("payment_fulfilment_topic_id", topic.message_thread_id)
+    try:
+        await bot.send_message(
+            ADMIN_REVIEW_CHAT_ID,
+            (
+                "✅ <b>Priya fulfilment queue is ready.</b>\n\n"
+                "Confirmed payments will appear here automatically."
+            ),
+            message_thread_id=topic.message_thread_id,
+        )
+    except TelegramBadRequest:
+        logging.info("Could not send Priya fulfilment topic intro")
+    return topic.message_thread_id
+
+
 def is_payment_approver(user_id: int) -> bool:
     if user_id in PAYMENT_APPROVER_USER_IDS:
         return True
@@ -798,10 +827,10 @@ async def callback_upi(query: CallbackQuery) -> None:
 
 async def deliver_payment_handoff(payment_id: str) -> bool:
     """Deliver one approved UPI payment to Priya's topic, with retry-safe state."""
-    topic_id = payment_fulfilment_topic_id()
-    if not ADMIN_REVIEW_CHAT_ID or not topic_id:
-        logging.error("Priya fulfilment topic is not configured for payment %s", payment_id)
+    if not ADMIN_REVIEW_CHAT_ID:
+        logging.error("Payment review chat is not configured for payment %s", payment_id)
         return False
+    topic_id = await ensure_payment_fulfilment_topic()
     with db_connect() as connection:
         payment = connection.execute(
             "SELECT * FROM upi_payments WHERE payment_id=?", (payment_id,)
@@ -836,7 +865,7 @@ async def deliver_payment_handoff(payment_id: str) -> bool:
                 f"⏱️ Approved: {payment['verified_at']}\n\n"
                 "Priya: please begin fulfilment for this confirmed payment."
             ),
-            message_thread_id=topic_id,
+            **({"message_thread_id": topic_id} if topic_id else {}),
         )
     except Exception as error:
         logging.exception("Failed to deliver approved payment %s to Priya", payment_id)
@@ -858,19 +887,18 @@ async def deliver_payment_handoff(payment_id: str) -> bool:
 async def payment_handoff_monitor() -> None:
     """Retry transient handoff failures without touching pending/rejected payments."""
     while True:
-        if payment_fulfilment_topic_id():
-            with db_connect() as connection:
-                pending_ids = [
-                    row["payment_id"]
-                    for row in connection.execute(
-                        """SELECT payment_id FROM upi_payments
-                        WHERE status='approved' AND fulfilment_message_id IS NULL
-                          AND fulfilment_status IN ('pending', 'failed')
-                        ORDER BY verified_at LIMIT 20"""
-                    )
-                ]
-            for pending_id in pending_ids:
-                await deliver_payment_handoff(pending_id)
+        with db_connect() as connection:
+            pending_ids = [
+                row["payment_id"]
+                for row in connection.execute(
+                    """SELECT payment_id FROM upi_payments
+                    WHERE status='approved' AND fulfilment_message_id IS NULL
+                      AND fulfilment_status IN ('pending', 'failed')
+                    ORDER BY verified_at LIMIT 20"""
+                )
+            ]
+        for pending_id in pending_ids:
+            await deliver_payment_handoff(pending_id)
         await asyncio.sleep(60)
 
 

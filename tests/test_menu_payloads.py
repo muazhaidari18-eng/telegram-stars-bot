@@ -188,6 +188,48 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Buyer: @buyername", caption)
         self.assertIn('tg://user?id=4242', caption)
 
+    async def test_handoff_auto_creates_priya_topic_when_missing(self):
+        bot.PAYMENT_FULFILMENT_TOPIC_ID = 0
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at,
+                 verified_at, screenshot_file_id, buyer_username, buyer_full_name,
+                 reviewed_by, reviewed_by_name, fulfilment_status)
+                VALUES ('pay-6', 4242, 'chat', 999, 'approved', 'now', 'now',
+                        'photo-file', '@buyername', 'Buyer Name', 1001, '@megha',
+                        'pending')"""
+            )
+        topic = SimpleNamespace(message_thread_id=88)
+        sent = SimpleNamespace(message_id=126)
+        with patch.object(bot.bot, "create_forum_topic", AsyncMock(return_value=topic)) as create_topic:
+            with patch.object(bot.bot, "send_message", AsyncMock()):
+                with patch.object(bot.bot, "send_photo", AsyncMock(return_value=sent)) as send_photo:
+                    self.assertTrue(await bot.deliver_payment_handoff("pay-6"))
+
+        create_topic.assert_awaited_once()
+        self.assertEqual(send_photo.await_args.kwargs["message_thread_id"], 88)
+        self.assertEqual(bot.payment_fulfilment_topic_id(), 88)
+
+    async def test_handoff_falls_back_to_main_group_when_topic_creation_fails(self):
+        bot.PAYMENT_FULFILMENT_TOPIC_ID = 0
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO upi_payments
+                (payment_id, user_id, product_key, amount, status, created_at,
+                 verified_at, screenshot_file_id, buyer_username, buyer_full_name,
+                 reviewed_by, reviewed_by_name, fulfilment_status)
+                VALUES ('pay-7', 4242, 'chat', 999, 'approved', 'now', 'now',
+                        'photo-file', '@buyername', 'Buyer Name', 1001, '@megha',
+                        'pending')"""
+            )
+        sent = SimpleNamespace(message_id=127)
+        with patch.object(bot.bot, "create_forum_topic", AsyncMock(side_effect=bot.TelegramBadRequest(method=None, message="no topics"))):
+            with patch.object(bot.bot, "send_photo", AsyncMock(return_value=sent)) as send_photo:
+                self.assertTrue(await bot.deliver_payment_handoff("pay-7"))
+
+        self.assertNotIn("message_thread_id", send_photo.await_args.kwargs)
+
     def test_pending_upi_payment_finds_existing_pending_review(self):
         with bot.db_connect() as connection:
             connection.execute(
