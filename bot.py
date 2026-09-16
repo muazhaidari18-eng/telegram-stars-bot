@@ -25,6 +25,9 @@ if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
     raise RuntimeError("BOT_TOKEN environment variable is required to run the bot.")
 
 PAYMENT_CHANNEL_ID = int(os.getenv("PAYMENT_CHANNEL_ID", "0"))
+SALES_REPORT_CHANNEL_ID = int(os.getenv("SALES_REPORT_CHANNEL_ID", str(PAYMENT_CHANNEL_ID)))
+DAILY_SALES_REPORT_HOUR = int(os.getenv("DAILY_SALES_REPORT_HOUR", "23"))
+DAILY_SALES_REPORT_MINUTE = int(os.getenv("DAILY_SALES_REPORT_MINUTE", "55"))
 PRIVATE_CHAT_GROUP_ID = int(os.getenv("PRIVATE_CHAT_GROUP_ID", "0"))
 ADMIN_REVIEW_CHAT_ID = PRIVATE_CHAT_GROUP_ID or PAYMENT_CHANNEL_ID
 PAYMENT_REVIEW_TOPIC_ID = int(os.getenv("PAYMENT_REVIEW_TOPIC_ID", "0"))
@@ -164,6 +167,9 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS stars_payments (
                 telegram_charge_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, product_key TEXT NOT NULL,
                 stars INTEGER NOT NULL, payment_type TEXT NOT NULL, paid_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS daily_sales_reports (
+                report_date TEXT PRIMARY KEY, sent_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS video_bookings (
                 booking_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, payment_method TEXT NOT NULL,
@@ -356,6 +362,110 @@ def pending_upi_payment(user_id: int, product_key: str) -> sqlite3.Row | None:
 
 def ist_text() -> str:
     return datetime.now(IST).strftime("%d-%m-%Y %I:%M:%S %p IST")
+
+
+def sales_summary(report_date: datetime | None = None) -> dict[str, int | str]:
+    """Return confirmed sales for one IST calendar day across Stars and UPI."""
+    report_date = report_date or datetime.now(IST)
+    day_key = report_date.strftime("%d-%m-%Y")
+    pattern = f"{day_key} %"
+    totals: dict[str, int | str] = {
+        "date_key": day_key,
+        "date_label": report_date.strftime("%d %b %Y"),
+        "total_sales": 0,
+        "chat_sales": 0,
+        "video_sales": 0,
+        "other_sales": 0,
+        "stars_revenue": 0,
+        "upi_revenue": 0,
+    }
+    with db_connect() as connection:
+        stars_rows = connection.execute(
+            """SELECT product_key, COUNT(*) AS sale_count, COALESCE(SUM(stars), 0) AS revenue
+            FROM stars_payments WHERE paid_at LIKE ? GROUP BY product_key""",
+            (pattern,),
+        ).fetchall()
+        upi_rows = connection.execute(
+            """SELECT product_key, COUNT(*) AS sale_count, COALESCE(SUM(amount), 0) AS revenue
+            FROM upi_payments
+            WHERE status='approved' AND verified_at LIKE ? GROUP BY product_key""",
+            (pattern,),
+        ).fetchall()
+
+    for row in stars_rows:
+        count = int(row["sale_count"])
+        totals["total_sales"] += count
+        totals["stars_revenue"] += int(row["revenue"])
+        category = row["product_key"] if row["product_key"] in {"chat", "video"} else "other"
+        totals[f"{category}_sales"] += count
+    for row in upi_rows:
+        count = int(row["sale_count"])
+        totals["total_sales"] += count
+        totals["upi_revenue"] += int(row["revenue"])
+        category = row["product_key"] if row["product_key"] in {"chat", "video"} else "other"
+        totals[f"{category}_sales"] += count
+    return totals
+
+
+def format_sales_summary(summary: dict[str, int | str], title: str = "TODAY'S SALES") -> str:
+    return (
+        f"📊 <b>{html.escape(title)} — {summary['date_label']}</b>\n\n"
+        f"✅ Total sales: <b>{summary['total_sales']}</b>\n"
+        f"💬 Text-message access: <b>{summary['chat_sales']}</b>\n"
+        f"📹 Video calls: <b>{summary['video_sales']}</b>\n"
+        f"🎁 Custom offers/tips: <b>{summary['other_sales']}</b>\n\n"
+        f"💰 Revenue\n"
+        f"⭐ Telegram Stars: <b>{int(summary['stars_revenue']):,}</b>\n"
+        f"🇮🇳 UPI: <b>₹{int(summary['upi_revenue']):,}</b>\n\n"
+        f"Updated: {ist_text()}"
+    )
+
+
+async def send_sales_update(event_label: str | None = None) -> bool:
+    if not SALES_REPORT_CHANNEL_ID:
+        logging.warning("Sales report channel is not configured")
+        return False
+    summary_text = format_sales_summary(sales_summary())
+    if event_label:
+        summary_text = f"🛒 <b>NEW CONFIRMED SALE</b>\n{html.escape(event_label)}\n\n{summary_text}"
+    try:
+        await bot.send_message(SALES_REPORT_CHANNEL_ID, summary_text)
+        return True
+    except Exception:
+        logging.exception("Unable to send sales summary")
+        return False
+
+
+def claim_daily_sales_report(report_date: datetime) -> bool:
+    """Claim a date before sending so restarts cannot create duplicate closing reports."""
+    with db_connect() as connection:
+        inserted = connection.execute(
+            "INSERT OR IGNORE INTO daily_sales_reports (report_date, sent_at) VALUES (?, ?)",
+            (report_date.strftime("%d-%m-%Y"), ist_text()),
+        )
+    return inserted.rowcount == 1
+
+
+def release_daily_sales_report(report_date: datetime) -> None:
+    with db_connect() as connection:
+        connection.execute(
+            "DELETE FROM daily_sales_reports WHERE report_date=?",
+            (report_date.strftime("%d-%m-%Y"),),
+        )
+
+
+async def daily_sales_report_monitor() -> None:
+    while True:
+        now = datetime.now(IST)
+        report_time_reached = (now.hour, now.minute) >= (
+            DAILY_SALES_REPORT_HOUR,
+            DAILY_SALES_REPORT_MINUTE,
+        )
+        if report_time_reached and claim_daily_sales_report(now):
+            sent = await send_sales_update()
+            if not sent:
+                release_daily_sales_report(now)
+        await asyncio.sleep(60)
 
 
 def set_flow(user_id: int, flow_state: str, context: str | None = None) -> None:
@@ -673,6 +783,15 @@ async def cmd_payment_handoff_status(message: Message) -> None:
     )
 
 
+@dp.message(Command(commands=["sales_today", "sales"]))
+async def cmd_sales_today(message: Message) -> None:
+    """Show confirmed Stars and approved UPI sales for the current IST day."""
+    if not (is_owner(message.from_user.id) or await is_operator(message.from_user.id)):
+        await message.answer("This command is only available to the operations team.")
+        return
+    await message.answer(format_sales_summary(sales_summary()))
+
+
 @dp.message(Command("offer"))
 async def cmd_offer(message: Message, command: CommandObject) -> None:
     if not await is_operator(message.from_user.id):
@@ -715,7 +834,12 @@ async def create_topic_offer(message: Message, command: CommandObject, extend: b
         return
     with db_connect() as connection:
         session = connection.execute(
-            "SELECT * FROM private_sessions WHERE topic_thread_id=? AND status='active'",
+            """
+            SELECT * FROM private_sessions
+            WHERE topic_thread_id=?
+            ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, starts_at DESC
+            LIMIT 1
+            """,
             (message.message_thread_id,),
         ).fetchone()
     if not session:
@@ -1005,6 +1129,9 @@ async def cmd_recover_upi_approval(message: Message) -> None:
         else:
             set_flow(parsed["user_id"], "video_date")
             await bot.send_message(parsed["user_id"], "What date works best for you?", reply_markup=back_keyboard().as_markup())
+        await send_sales_update(
+            f"{get_product_name(parsed['product_key'])} · ₹{int(parsed['amount']):,} UPI"
+        )
     await message.answer(f"✅ Payment recovered, approved by {html.escape(reviewer_name)}, and sent to Priya.")
 
 
@@ -1118,6 +1245,9 @@ async def callback_verify_upi(query: CallbackQuery) -> None:
     else:
         set_flow(payment["user_id"], "video_date")
         await bot.send_message(payment["user_id"], "What date works best for you?", reply_markup=back_keyboard().as_markup())
+    await send_sales_update(
+        f"{get_product_name(payment['product_key'])} · ₹{int(payment['amount']):,} UPI"
+    )
 
 
 @dp.callback_query(F.data.startswith("pay_"))
@@ -1191,16 +1321,18 @@ async def successful_payment(message: Message):
             return
         with db_connect() as connection:
             connection.execute("UPDATE private_offers SET status='active' WHERE token=?", (token,))
-            connection.execute(
+            recorded = connection.execute(
                 "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
                 (message.successful_payment.telegram_payment_charge_id, message.from_user.id, payload, stars, "one-time", ist_text()),
-            )
+            ).rowcount == 1
         await message.answer("✅ Tip received. Thank you!")
         if PAYMENT_CHANNEL_ID:
             await bot.send_message(
                 PAYMENT_CHANNEL_ID,
                 f"💰 CUSTOM TIP PAID\n\n👤 User ID: {message.from_user.id}\n⭐ Stars: {stars}\n📝 For: {html.escape(offer['description'])}\n⏱️ Time: {ist_text()}",
             )
+        if recorded:
+            await send_sales_update(f"Custom tip · {stars:,} Stars")
         return
 
     if payload.startswith("topicoffer_"):
@@ -1216,14 +1348,16 @@ async def successful_payment(message: Message):
                 current_expiry = max(datetime.fromisoformat(session["expires_at"]), datetime.now(IST))
                 new_expiry = current_expiry + timedelta(hours=offer["duration_hours"])
                 connection.execute("UPDATE private_sessions SET expires_at=? WHERE session_code=?", (new_expiry.isoformat(), session["session_code"]))
-            connection.execute(
+            recorded = connection.execute(
                 "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
                 (message.successful_payment.telegram_payment_charge_id, message.from_user.id, payload, stars, "one-time", ist_text()),
-            )
+            ).rowcount == 1
         await message.answer("✅ Payment received. Thank you!")
         if session and PRIVATE_CHAT_GROUP_ID and session["topic_thread_id"]:
             detail = f" · access extended by {offer['duration_hours']} hours" if offer["duration_hours"] else ""
             await bot.send_message(PRIVATE_CHAT_GROUP_ID, f"💰 <b>{stars:,} Stars paid</b>{detail}\n{html.escape(offer['description'])}", message_thread_id=session["topic_thread_id"])
+        if recorded:
+            await send_sales_update(f"Custom offer · {stars:,} Stars")
         return
 
     username = (
@@ -1240,10 +1374,10 @@ async def successful_payment(message: Message):
 
     payment_type = "one-time"
     with db_connect() as connection:
-        connection.execute(
+        recorded = connection.execute(
             "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
             (message.successful_payment.telegram_payment_charge_id, user_id, product_key, stars, payment_type, ist_text()),
-        )
+        ).rowcount == 1
 
     admin_message = f"""
 💰 PAYMENT RECEIVED
@@ -1259,6 +1393,8 @@ async def successful_payment(message: Message):
 """
 
     await bot.send_message(PAYMENT_CHANNEL_ID, admin_message)
+    if recorded:
+        await send_sales_update(f"{product_name} · {stars:,} Stars")
     if product_key == "chat":
         expires_at = datetime.now(IST) + timedelta(days=30)
         activate_chat(user_id, "Telegram Stars", expires_at)
@@ -1331,6 +1467,7 @@ async def callback_back_to_video(query: CallbackQuery) -> None:
 async def start_background_tasks() -> None:
     asyncio.create_task(expiry_monitor())
     asyncio.create_task(payment_handoff_monitor())
+    asyncio.create_task(daily_sales_report_monitor())
 
 
 if __name__ == "__main__":
