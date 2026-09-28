@@ -205,6 +205,13 @@ def init_db() -> None:
                 description TEXT NOT NULL, status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pending_tip_commands (
+                token TEXT PRIMARY KEY, customer_id INTEGER NOT NULL,
+                stars INTEGER NOT NULL, duration_hours INTEGER NOT NULL DEFAULT 0,
+                description TEXT NOT NULL, origin_chat_id INTEGER NOT NULL,
+                origin_dm_topic_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL, confirmed_by INTEGER
+            );
             CREATE TABLE IF NOT EXISTS relay_messages (
                 operator_message_id INTEGER PRIMARY KEY, session_code TEXT NOT NULL,
                 customer_id INTEGER NOT NULL
@@ -865,9 +872,6 @@ async def create_topic_offer(message: Message, command: CommandObject, extend: b
         and message.chat.id == PRIVATE_CHAT_GROUP_ID
         and message.message_thread_id
     )
-    if not is_tip_operator(message.from_user.id):
-        await answer_tip_context(message, "This command is not available.")
-        return
     if not (is_direct_channel_topic or is_private_customer_topic):
         await answer_tip_context(message, "Use this command inside an approved customer conversation.")
         return
@@ -881,6 +885,37 @@ async def create_topic_offer(message: Message, command: CommandObject, extend: b
     except (ValueError, IndexError):
         usage = "/extend STARS HOURS [description]" if extend else "/tip STARS [description]"
         await answer_tip_context(message, f"Use: <code>{usage}</code>")
+        return
+    if not is_tip_operator(message.from_user.id):
+        # Telegram deliberately hides the human administrator's identity when
+        # they reply as the channel in a channel Direct Messages topic. A
+        # callback query, however, contains the real user who pressed it. Stage
+        # the request and require an explicitly allowlisted operator to confirm.
+        if is_direct_channel_topic and getattr(message, "sender_chat", None):
+            pending_token = secrets.token_urlsafe(8)
+            with db_connect() as connection:
+                connection.execute(
+                    """INSERT INTO pending_tip_commands
+                    (token, customer_id, stars, duration_hours, description,
+                     origin_chat_id, origin_dm_topic_id, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                    (pending_token, direct_topic.user.id, stars, hours, description,
+                     message.chat.id, direct_topic.topic_id, datetime.now(IST).isoformat()),
+                )
+            keyboard = InlineKeyboardBuilder()
+            keyboard.button(
+                text=f"Confirm {stars:,} Stars",
+                callback_data=f"confirmtip:{pending_token}",
+            )
+            await bot.send_message(
+                message.chat.id,
+                "🔐 <b>Operator confirmation required</b>\n"
+                "Only an authorized operator can send this request.",
+                direct_messages_topic_id=direct_topic.topic_id,
+                reply_markup=keyboard.as_markup(),
+            )
+            return
+        await answer_tip_context(message, "This command is not available.")
         return
     if is_direct_channel_topic:
         customer_id = direct_topic.user.id
@@ -932,6 +967,57 @@ async def create_topic_offer(message: Message, command: CommandObject, extend: b
         message,
         f"✅ Sent <b>{stars:,} Stars</b> request to the customer: {html.escape(description)}",
     )
+
+
+@dp.callback_query(F.data.startswith("confirmtip:"))
+async def callback_confirm_channel_tip(query: CallbackQuery) -> None:
+    """Reveal the real operator identity before sending a channel-DM invoice."""
+    if not is_tip_operator(query.from_user.id):
+        await query.answer("This command is not available.", show_alert=True)
+        return
+    pending_token = query.data.split(":", 1)[1]
+    with db_connect() as connection:
+        pending = connection.execute(
+            "SELECT * FROM pending_tip_commands WHERE token=? AND status='pending'",
+            (pending_token,),
+        ).fetchone()
+        if not pending:
+            await query.answer("This request was already used or expired.", show_alert=True)
+            return
+        claimed = connection.execute(
+            "UPDATE pending_tip_commands SET status='confirmed', confirmed_by=? "
+            "WHERE token=? AND status='pending'",
+            (query.from_user.id, pending_token),
+        ).rowcount
+    if not claimed:
+        await query.answer("This request was already used.", show_alert=True)
+        return
+    offer_token = secrets.token_urlsafe(12)
+    session_code = f"DM-{pending['origin_chat_id']}-{pending['origin_dm_topic_id']}"
+    with db_connect() as connection:
+        connection.execute(
+            """INSERT INTO topic_offers
+            (token, session_code, customer_id, stars, duration_hours, description,
+             status, created_at, origin_chat_id, origin_dm_topic_id, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+            (offer_token, session_code, pending["customer_id"], pending["stars"],
+             pending["duration_hours"], pending["description"],
+             datetime.now(IST).isoformat(), pending["origin_chat_id"],
+             pending["origin_dm_topic_id"], query.from_user.id),
+        )
+    await bot.send_invoice(
+        chat_id=pending["origin_chat_id"],
+        direct_messages_topic_id=pending["origin_dm_topic_id"],
+        title=("Extend Private Access" if pending["duration_hours"] else "Tip Megha"),
+        description=pending["description"][:255],
+        payload=f"topicoffer_{offer_token}", currency="XTR",
+        prices=[LabeledPrice(label=pending["description"][:32], amount=pending["stars"])],
+    )
+    await query.message.edit_text(
+        f"✅ Sent <b>{pending['stars']:,} Stars</b> request to the customer: "
+        f"{html.escape(pending['description'])}"
+    )
+    await query.answer("Request sent")
 
 
 @dp.message(Command("tip"))
