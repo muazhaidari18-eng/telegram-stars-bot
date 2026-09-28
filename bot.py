@@ -37,6 +37,16 @@ PAYMENT_APPROVER_USER_IDS = {
     for user_id in os.getenv("PAYMENT_APPROVER_USER_IDS", "").split(",")
     if user_id.strip()
 }
+TIP_OPERATOR_USER_IDS = {
+    int(user_id.strip())
+    for user_id in os.getenv("TIP_OPERATOR_USER_IDS", "").split(",")
+    if user_id.strip()
+}
+TIP_DIRECT_MESSAGE_CHAT_IDS = {
+    int(chat_id.strip())
+    for chat_id in os.getenv("TIP_DIRECT_MESSAGE_CHAT_IDS", "").split(",")
+    if chat_id.strip()
+}
 UPI_ID = os.getenv("UPI_ID", "Megha.shaw@ptyes")
 UPI_QR_IMAGE_URL = os.getenv(
     "UPI_QR_IMAGE_URL",
@@ -207,6 +217,14 @@ def init_db() -> None:
         offer_columns = {row["name"] for row in connection.execute("PRAGMA table_info(private_offers)")}
         if "description" not in offer_columns:
             connection.execute("ALTER TABLE private_offers ADD COLUMN description TEXT NOT NULL DEFAULT 'Tip'")
+        topic_offer_columns = {row["name"] for row in connection.execute("PRAGMA table_info(topic_offers)")}
+        for name, definition in (
+            ("origin_chat_id", "INTEGER"),
+            ("origin_dm_topic_id", "INTEGER"),
+            ("created_by", "INTEGER"),
+        ):
+            if name not in topic_offer_columns:
+                connection.execute(f"ALTER TABLE topic_offers ADD COLUMN {name} {definition}")
         payment_columns = {row["name"] for row in connection.execute("PRAGMA table_info(upi_payments)")}
         for name, definition in (
             ("screenshot_file_id", "TEXT"),
@@ -516,6 +534,24 @@ async def is_operator(user_id: int) -> bool:
         return False
 
 
+def is_tip_operator(user_id: int) -> bool:
+    """Tip creation is restricted to the owner and explicitly listed staff."""
+    return is_owner(user_id) or user_id in TIP_OPERATOR_USER_IDS
+
+
+async def answer_tip_context(message: Message, text: str) -> None:
+    """Keep command feedback inside the originating channel-DM topic."""
+    direct_topic = getattr(message, "direct_messages_topic", None)
+    if direct_topic:
+        await bot.send_message(
+            message.chat.id,
+            text,
+            direct_messages_topic_id=direct_topic.topic_id,
+        )
+        return
+    await message.answer(text)
+
+
 def active_private_session(user_id: int) -> sqlite3.Row | None:
     with db_connect() as connection:
         row = connection.execute(
@@ -818,45 +854,84 @@ async def cmd_offer(message: Message, command: CommandObject) -> None:
 
 
 async def create_topic_offer(message: Message, command: CommandObject, extend: bool) -> None:
-    if not (await is_operator(message.from_user.id) and PRIVATE_CHAT_GROUP_ID and message.chat.id == PRIVATE_CHAT_GROUP_ID and message.message_thread_id):
-        await message.answer("This command is only available to an admin inside an active customer topic.")
+    direct_topic = getattr(message, "direct_messages_topic", None)
+    is_direct_channel_topic = bool(
+        direct_topic
+        and message.chat.id in TIP_DIRECT_MESSAGE_CHAT_IDS
+        and getattr(direct_topic, "user", None)
+    )
+    is_private_customer_topic = bool(
+        PRIVATE_CHAT_GROUP_ID
+        and message.chat.id == PRIVATE_CHAT_GROUP_ID
+        and message.message_thread_id
+    )
+    if not is_tip_operator(message.from_user.id):
+        await answer_tip_context(message, "This command is not available.")
+        return
+    if not (is_direct_channel_topic or is_private_customer_topic):
+        await answer_tip_context(message, "Use this command inside an approved customer conversation.")
         return
     parts = (command.args or "").split(maxsplit=2 if extend else 1)
     try:
-        stars = int(parts[0])
+        stars = int(parts[0].replace(",", ""))
         hours = int(parts[1]) if extend else 0
         description = parts[2] if extend and len(parts) > 2 else (parts[1] if not extend and len(parts) > 1 else ("Extra private-chat access" if extend else "Tip"))
         if stars < 1 or hours < 0 or hours > 24 * 365:
             raise ValueError
     except (ValueError, IndexError):
-        usage = "/extend STARS HOURS description" if extend else "/tip STARS description"
-        await message.answer(f"Use: <code>{usage}</code>")
+        usage = "/extend STARS HOURS [description]" if extend else "/tip STARS [description]"
+        await answer_tip_context(message, f"Use: <code>{usage}</code>")
         return
-    with db_connect() as connection:
-        session = connection.execute(
-            """
-            SELECT * FROM private_sessions
-            WHERE topic_thread_id=?
-            ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, starts_at DESC
-            LIMIT 1
-            """,
-            (message.message_thread_id,),
-        ).fetchone()
-    if not session:
-        await message.answer("This topic does not have an active customer session.")
-        return
+    if is_direct_channel_topic:
+        customer_id = direct_topic.user.id
+        session_code = f"DM-{message.chat.id}-{direct_topic.topic_id}"
+        origin_chat_id = message.chat.id
+        origin_dm_topic_id = direct_topic.topic_id
+        invoice_destination = message.chat.id
+        invoice_topic = direct_topic.topic_id
+    else:
+        with db_connect() as connection:
+            session = connection.execute(
+                """
+                SELECT * FROM private_sessions
+                WHERE topic_thread_id=?
+                ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, starts_at DESC
+                LIMIT 1
+                """,
+                (message.message_thread_id,),
+            ).fetchone()
+        if not session:
+            await answer_tip_context(message, "This topic does not have a customer session.")
+            return
+        customer_id = session["customer_id"]
+        session_code = session["session_code"]
+        origin_chat_id = None
+        origin_dm_topic_id = None
+        invoice_destination = customer_id
+        invoice_topic = None
     token = secrets.token_urlsafe(12)
     with db_connect() as connection:
         connection.execute(
-            "INSERT INTO topic_offers VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
-            (token, session["session_code"], session["customer_id"], stars, hours, description, datetime.now(IST).isoformat()),
+            """INSERT INTO topic_offers
+            (token, session_code, customer_id, stars, duration_hours, description,
+             status, created_at, origin_chat_id, origin_dm_topic_id, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+            (token, session_code, customer_id, stars, hours, description,
+             datetime.now(IST).isoformat(), origin_chat_id, origin_dm_topic_id,
+             message.from_user.id),
         )
-    await bot.send_invoice(
-        chat_id=session["customer_id"], title=("Extend Private Access" if extend else "Tip Megha"),
+    invoice_kwargs = dict(
+        chat_id=invoice_destination, title=("Extend Private Access" if extend else "Tip Megha"),
         description=description[:255], payload=f"topicoffer_{token}", currency="XTR",
         prices=[LabeledPrice(label=description[:32], amount=stars)],
     )
-    await message.answer(f"✅ Sent <b>{stars:,} Stars</b> request to the customer: {html.escape(description)}")
+    if invoice_topic is not None:
+        invoice_kwargs["direct_messages_topic_id"] = invoice_topic
+    await bot.send_invoice(**invoice_kwargs)
+    await answer_tip_context(
+        message,
+        f"✅ Sent <b>{stars:,} Stars</b> request to the customer: {html.escape(description)}",
+    )
 
 
 @dp.message(Command("tip"))
@@ -1356,6 +1431,17 @@ async def successful_payment(message: Message):
         if session and PRIVATE_CHAT_GROUP_ID and session["topic_thread_id"]:
             detail = f" · access extended by {offer['duration_hours']} hours" if offer["duration_hours"] else ""
             await bot.send_message(PRIVATE_CHAT_GROUP_ID, f"💰 <b>{stars:,} Stars paid</b>{detail}\n{html.escape(offer['description'])}", message_thread_id=session["topic_thread_id"])
+        if offer["origin_chat_id"] and offer["origin_dm_topic_id"]:
+            await bot.send_message(
+                offer["origin_chat_id"],
+                f"💰 <b>{stars:,} Stars paid</b>\n{html.escape(offer['description'])}",
+                direct_messages_topic_id=offer["origin_dm_topic_id"],
+            )
+        if PAYMENT_CHANNEL_ID:
+            await bot.send_message(
+                PAYMENT_CHANNEL_ID,
+                f"💰 DIRECT CHAT TIP PAID\n\n👤 User ID: {message.from_user.id}\n⭐ Stars: {stars:,}\n📝 For: {html.escape(offer['description'])}\n⏱️ Time: {ist_text()}",
+            )
         if recorded:
             await send_sales_update(f"Custom offer · {stars:,} Stars")
         return
