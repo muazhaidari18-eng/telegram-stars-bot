@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import aiogram
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, LabeledPrice, Message, PreCheckoutQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -557,6 +557,34 @@ async def answer_tip_context(message: Message, text: str) -> None:
         )
         return
     await message.answer(text)
+
+
+async def safe_payment_ack(message: Message, text: str) -> bool:
+    """A blocked customer must never interrupt payment recording or staff notices."""
+    try:
+        await message.answer(text)
+        return True
+    except TelegramForbiddenError:
+        logging.warning(
+            "Payment was recorded, but customer %s has blocked the bot; skipping customer acknowledgement",
+            message.from_user.id,
+        )
+    except TelegramAPIError:
+        logging.exception(
+            "Payment was recorded, but the customer acknowledgement failed for %s",
+            message.from_user.id,
+        )
+    return False
+
+
+async def safe_payment_notice(chat_id: int, text: str, **kwargs) -> bool:
+    """Keep independent payment notifications from cancelling one another."""
+    try:
+        await bot.send_message(chat_id, text, **kwargs)
+        return True
+    except TelegramAPIError:
+        logging.exception("Payment notification failed for chat %s", chat_id)
+        return False
 
 
 def active_private_session(user_id: int) -> sqlite3.Row | None:
@@ -1486,12 +1514,12 @@ async def successful_payment(message: Message):
                 "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
                 (message.successful_payment.telegram_payment_charge_id, message.from_user.id, payload, stars, "one-time", ist_text()),
             ).rowcount == 1
-        await message.answer("✅ Tip received. Thank you!")
         if PAYMENT_CHANNEL_ID:
-            await bot.send_message(
+            await safe_payment_notice(
                 PAYMENT_CHANNEL_ID,
                 f"💰 CUSTOM TIP PAID\n\n👤 User ID: {message.from_user.id}\n⭐ Stars: {stars}\n📝 For: {html.escape(offer['description'])}\n⏱️ Time: {ist_text()}",
             )
+        await safe_payment_ack(message, "✅ Tip received. Thank you!")
         if recorded:
             await send_sales_update(f"Custom tip · {stars:,} Stars")
         return
@@ -1513,21 +1541,25 @@ async def successful_payment(message: Message):
                 "INSERT OR IGNORE INTO stars_payments VALUES (?, ?, ?, ?, ?, ?)",
                 (message.successful_payment.telegram_payment_charge_id, message.from_user.id, payload, stars, "one-time", ist_text()),
             ).rowcount == 1
-        await message.answer("✅ Payment received. Thank you!")
         if session and PRIVATE_CHAT_GROUP_ID and session["topic_thread_id"]:
             detail = f" · access extended by {offer['duration_hours']} hours" if offer["duration_hours"] else ""
-            await bot.send_message(PRIVATE_CHAT_GROUP_ID, f"💰 <b>{stars:,} Stars paid</b>{detail}\n{html.escape(offer['description'])}", message_thread_id=session["topic_thread_id"])
+            await safe_payment_notice(
+                PRIVATE_CHAT_GROUP_ID,
+                f"💰 <b>{stars:,} Stars paid</b>{detail}\n{html.escape(offer['description'])}",
+                message_thread_id=session["topic_thread_id"],
+            )
         if offer["origin_chat_id"] and offer["origin_dm_topic_id"]:
-            await bot.send_message(
+            await safe_payment_notice(
                 offer["origin_chat_id"],
                 f"💰 <b>{stars:,} Stars paid</b>\n{html.escape(offer['description'])}",
                 direct_messages_topic_id=offer["origin_dm_topic_id"],
             )
         if PAYMENT_CHANNEL_ID:
-            await bot.send_message(
+            await safe_payment_notice(
                 PAYMENT_CHANNEL_ID,
                 f"💰 DIRECT CHAT TIP PAID\n\n👤 User ID: {message.from_user.id}\n⭐ Stars: {stars:,}\n📝 For: {html.escape(offer['description'])}\n⏱️ Time: {ist_text()}",
             )
+        await safe_payment_ack(message, "✅ Payment received. Thank you!")
         if recorded:
             await send_sales_update(f"Custom offer · {stars:,} Stars")
         return

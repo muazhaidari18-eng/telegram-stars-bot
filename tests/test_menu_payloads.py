@@ -86,6 +86,149 @@ class StarsPaymentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("provider_token", send_invoice.await_args.kwargs)
 
 
+class SuccessfulPaymentResilienceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        handle = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+        handle.close()
+        self.database_path = handle.name
+        self.original_database_path = bot.DATABASE_PATH
+        self.original_payment_channel_id = bot.PAYMENT_CHANNEL_ID
+        self.original_private_chat_group_id = bot.PRIVATE_CHAT_GROUP_ID
+        bot.DATABASE_PATH = self.database_path
+        bot.PAYMENT_CHANNEL_ID = -100777000111
+        bot.PRIVATE_CHAT_GROUP_ID = -100888000222
+        bot.init_db()
+
+    def tearDown(self):
+        bot.DATABASE_PATH = self.original_database_path
+        bot.PAYMENT_CHANNEL_ID = self.original_payment_channel_id
+        bot.PRIVATE_CHAT_GROUP_ID = self.original_private_chat_group_id
+        gc.collect()
+        os.unlink(self.database_path)
+
+    def direct_tip_message(self, answer):
+        return SimpleNamespace(
+            from_user=SimpleNamespace(id=42),
+            successful_payment=SimpleNamespace(
+                invoice_payload="topicoffer_tip-token",
+                total_amount=2500,
+                telegram_payment_charge_id="charge-2500",
+            ),
+            answer=answer,
+        )
+
+    def insert_direct_tip(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO topic_offers
+                (token, session_code, customer_id, stars, duration_hours,
+                 description, status, created_at, origin_chat_id,
+                 origin_dm_topic_id, created_by)
+                VALUES ('tip-token', 'DM-1-2', 42, 2500, 0, 'Tip', 'pending',
+                        'now', -1004329721962, 98765, 7)"""
+            )
+
+    def private_tip_message(self, answer):
+        return SimpleNamespace(
+            from_user=SimpleNamespace(id=42),
+            successful_payment=SimpleNamespace(
+                invoice_payload="offer_private-token",
+                total_amount=2500,
+                telegram_payment_charge_id="charge-private-2500",
+            ),
+            answer=answer,
+        )
+
+    def insert_private_tip(self):
+        with bot.db_connect() as connection:
+            connection.execute(
+                """INSERT INTO private_offers
+                (token, created_by, stars, duration_hours, status, claimed_by,
+                 created_at, description)
+                VALUES ('private-token', 7, 2500, 0, 'pending', 42, 'now', 'Tip')"""
+            )
+
+    async def test_blocked_customer_cannot_stop_private_tip_reporting(self):
+        self.insert_private_tip()
+        blocked = bot.TelegramForbiddenError(method=None, message="bot was blocked by the user")
+        message = self.private_tip_message(AsyncMock(side_effect=blocked))
+
+        with patch.object(bot.bot, "send_message", AsyncMock()) as send_message:
+            with patch.object(bot, "send_sales_update", AsyncMock(return_value=True)) as sales_update:
+                await bot.successful_payment(message)
+
+        message.answer.assert_awaited_once_with("✅ Tip received. Thank you!")
+        send_message.assert_awaited_once()
+        self.assertEqual(send_message.await_args.args[0], -100777000111)
+        self.assertIn("CUSTOM TIP PAID", send_message.await_args.args[1])
+        sales_update.assert_awaited_once_with("Custom tip · 2,500 Stars")
+
+        with bot.db_connect() as connection:
+            offer = connection.execute(
+                "SELECT status FROM private_offers WHERE token='private-token'"
+            ).fetchone()
+            payments = connection.execute(
+                "SELECT * FROM stars_payments WHERE telegram_charge_id='charge-private-2500'"
+            ).fetchall()
+        self.assertEqual(offer["status"], "active")
+        self.assertEqual(len(payments), 1)
+
+    async def test_blocked_customer_cannot_stop_direct_confirmation(self):
+        self.insert_direct_tip()
+        blocked = bot.TelegramForbiddenError(method=None, message="bot was blocked by the user")
+        message = self.direct_tip_message(AsyncMock(side_effect=blocked))
+
+        with patch.object(bot.bot, "send_message", AsyncMock()) as send_message:
+            with patch.object(bot, "send_sales_update", AsyncMock(return_value=True)) as sales_update:
+                await bot.successful_payment(message)
+
+        message.answer.assert_awaited_once_with("✅ Payment received. Thank you!")
+        self.assertEqual(send_message.await_count, 2)
+        direct_notice = send_message.await_args_list[0]
+        self.assertEqual(direct_notice.args[0], -1004329721962)
+        self.assertEqual(direct_notice.kwargs["direct_messages_topic_id"], 98765)
+        self.assertIn("2,500 Stars paid", direct_notice.args[1])
+        self.assertEqual(send_message.await_args_list[1].args[0], -100777000111)
+        sales_update.assert_awaited_once_with("Custom offer · 2,500 Stars")
+
+        with bot.db_connect() as connection:
+            offer = connection.execute(
+                "SELECT status FROM topic_offers WHERE token='tip-token'"
+            ).fetchone()
+            payments = connection.execute(
+                "SELECT * FROM stars_payments WHERE telegram_charge_id='charge-2500'"
+            ).fetchall()
+        self.assertEqual(offer["status"], "paid")
+        self.assertEqual(len(payments), 1)
+        self.assertEqual(payments[0]["stars"], 2500)
+
+    async def test_direct_notice_failure_does_not_stop_admin_or_sales(self):
+        self.insert_direct_tip()
+        message = self.direct_tip_message(AsyncMock())
+        direct_error = bot.TelegramBadRequest(method=None, message="direct topic unavailable")
+        send_message = AsyncMock(side_effect=[direct_error, None])
+
+        with patch.object(bot.bot, "send_message", send_message):
+            with patch.object(bot, "send_sales_update", AsyncMock(return_value=True)) as sales_update:
+                await bot.successful_payment(message)
+
+        self.assertEqual(send_message.await_count, 2)
+        self.assertEqual(send_message.await_args_list[1].args[0], -100777000111)
+        message.answer.assert_awaited_once_with("✅ Payment received. Thank you!")
+        sales_update.assert_awaited_once_with("Custom offer · 2,500 Stars")
+
+    async def test_normal_direct_payment_posts_every_confirmation(self):
+        self.insert_direct_tip()
+        message = self.direct_tip_message(AsyncMock())
+
+        with patch.object(bot.bot, "send_message", AsyncMock()) as send_message:
+            with patch.object(bot, "send_sales_update", AsyncMock(return_value=True)) as sales_update:
+                await bot.successful_payment(message)
+
+        self.assertEqual(send_message.await_count, 2)
+        message.answer.assert_awaited_once_with("✅ Payment received. Thank you!")
+        sales_update.assert_awaited_once()
+
 class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         handle = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
@@ -264,7 +407,7 @@ class PaymentHandoffTests(unittest.IsolatedAsyncioTestCase):
             answer=AsyncMock(),
         )
         command = SimpleNamespace(args="15000 Video call")
-        with patch.object(bot, "is_operator", AsyncMock(return_value=True)):
+        with patch.object(bot, "is_tip_operator", return_value=True):
             with patch.object(bot.bot, "send_invoice", AsyncMock()) as send_invoice:
                 await bot.create_topic_offer(message, command, extend=False)
 
